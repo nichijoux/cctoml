@@ -1,0 +1,22 @@
+odt1 = 1979-05-27T07:32:00Z
+odt2 = 1979-05-27T00:32:00-07:00
+odt3 = 1979-05-27T00:32:00.999999-07:00
+
+[[fruits]]
+name = "apple"
+
+[fruits.physical]  # 子表
+color = "red"
+shape = "round"
+
+[[fruits.varieties]]  # 嵌套表数组
+name = "red delicious"
+
+[[fruits.varieties]]
+name = "granny smith"
+
+[[fruits]]
+name = "banana"
+
+[[fruits.varieties]]
+name = "plantain"
