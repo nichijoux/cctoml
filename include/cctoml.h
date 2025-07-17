@@ -30,11 +30,11 @@ enum class TomlType { Boolean, Integer, Double, String, Date, Array, Object };
 
 class TomlValue;
 
-struct TomlLocalDate {
-    int year;
-    int month;
-    int day;
-};
+namespace parser {
+    TomlValue Parse(std::string_view data);
+
+    std::string Stringify(const TomlValue& value);
+}  // namespace parser
 
 using TomlString = std::string;
 using TomlArray  = std::vector<TomlValue>;
@@ -109,6 +109,8 @@ class TomlDate {
         return m_tzOffset;
     }
 
+    void reset();
+
     // 将对象转换回 TOML 格式的字符串
     std::string toString() const;
 
@@ -135,15 +137,32 @@ class TomlDate {
     }
 
   private:
+    static std::optional<int> parseDigits(const std::string_view& sv, size_t& position, int count);
+
+  private:
+    bool parseTimePart(const std::string_view& sv, size_t& position);
+
+    void parseSubSecond(const std::string_view& sv, size_t& position);
+
+    void parseTimezoneOffset(const std::string_view& sv, size_t& position);
+
+    bool parseLocalTime(const std::string_view& sv);
+
+    bool parseDateTimeWithDate(const std::string_view& sv);
+
     void parse(const std::string& s);
 
   private:
+    // 详细的日期类型
     TomlDateTimeType m_type;
-
-    std::optional<int>                      m_year, m_month, m_day;
-    std::optional<int>                      m_hour, m_minute, m_second;
+    // 年、月、日
+    std::optional<int> m_year, m_month, m_day;
+    // 时、分、秒
+    std::optional<int> m_hour, m_minute, m_second;
+    // subsecond
     std::optional<std::chrono::nanoseconds> m_subSecond;
-    std::optional<std::chrono::minutes>     m_tzOffset;
+    // 时区偏移
+    std::optional<std::chrono::minutes> m_tzOffset;
 };
 
 /**
@@ -195,7 +214,6 @@ struct HasFromToml<
 };
 
 // 容器序列化支持
-
 /**
  * @brief Toml 对象反序列化为 std::vector
  * @tparam T 向量元素的类型
@@ -394,6 +412,14 @@ class TomlValue {
     }
 
     /**
+     * @brief 检查是否为日期类型。
+     * @return 如果是日期类型，返回 true，否则返回 false。
+     */
+    inline bool isDate() const noexcept {
+        return m_type == TomlType::Date;
+    }
+
+    /**
      * @brief 检查是否为数组类型。
      * @return 如果是数组，返回 true，否则返回 false。
      */
@@ -478,6 +504,8 @@ class TomlValue {
         } else if constexpr (std::is_same_v<rawT, std::string> ||
                              std::is_same_v<rawT, std::string_view>) {
             return operator std::string();
+        } else if constexpr (std::is_same_v<rawT, TomlDate>) {
+            return asDate();
         } else if constexpr (HasFromToml<rawT>::value) {
             // 处理自定义类型
             rawT result;
@@ -500,12 +528,7 @@ class TomlValue {
     template <typename T, std::enable_if_t<std::is_integral_v<std::remove_reference_t<T>>, int> = 0>
     TomlValue& operator[](T&& key) {
         // key为数字
-        if (!isArray()) {
-            destroyValue();
-            m_type        = TomlType::Array;
-            m_value.array = new TomlArray();
-        }
-        auto& arr = *m_value.array;
+        auto& arr = asArray();
         if (key >= 0) {
             if (static_cast<size_t>(key) >= arr.size()) {
                 arr.resize(key + 1);
@@ -528,12 +551,8 @@ class TomlValue {
                        std::is_same_v<std::remove_cv_t<std::remove_reference_t<T>>, const char*>),
                   int> = 0>
     TomlValue& operator[](T&& key) {
-        if (!isObject()) {
-            destroyValue();
-            m_type         = TomlType::Object;
-            m_value.object = new TomlObject;
-        }
-        return (*m_value.object)[std::forward<T>(key)];
+        auto& object = asObject();
+        return object[std::forward<T>(key)];
     }
 
     /**
@@ -546,10 +565,7 @@ class TomlValue {
      */
     template <typename T, std::enable_if_t<std::is_integral_v<std::remove_reference_t<T>>, int> = 0>
     const TomlValue& operator[](T&& key) const {
-        if (!isArray()) {
-            throw TomlException("Not an Array");
-        }
-        auto& arr = *m_value.array;
+        auto& arr = asArray();
         if (key >= 0 && static_cast<size_t>(key) < arr.size()) {
             return arr[key];
         }
@@ -570,11 +586,9 @@ class TomlValue {
                        std::is_same_v<std::remove_cv_t<std::remove_reference_t<T>>, const char*>),
                   int> = 0>
     const TomlValue& operator[](T&& key) const {
-        if (!isObject()) {
-            throw TomlException("Not an Object");
-        }
-        auto it = m_value.object->find(std::forward<T>(key));
-        if (it != m_value.object->end()) {
+        const auto& object = asObject();
+        auto        it     = object.find(std::forward<T>(key));
+        if (it != object.end()) {
             return it->second;
         }
         throw TomlException("Key not found");
@@ -645,7 +659,9 @@ class TomlValue {
      * @param indent 缩进空格数（默认 0，表示无缩进）
      * @return Toml 值的字符串表示。
      */
-    std::string toString() const;
+    inline std::string toString() const {
+        return parser::Stringify(*this);
+    }
 
     /**
      * @brief 输出 Toml 值到流。
@@ -673,58 +689,6 @@ class TomlValue {
         TomlArray*  array;    ///< 数组指针
         TomlObject* object;   ///< 对象指针
     } m_value{};              ///< 存储值的联合体
-};
-
-class TomlParser {
-  public:
-    static TomlValue Parse(std::string_view data);
-
-    static std::string Stringify(const TomlValue& value);
-
-  private:
-    static std::vector<std::string>
-    ParseTableHeader(const std::string_view& data, size_t& position, bool isArray);
-    static std::pair<std::vector<TomlString>, TomlValue> ParseKeyValue(const std::string_view& data,
-                                                                       size_t& position);
-    static TomlValue ParseValue(const std::string_view& data, size_t& position);
-    static TomlString
-    ParseBareKey(const std::string_view& data, size_t& position, bool isTable = false);
-    static TomlString ParseQuotedKeys(const std::string_view& data, size_t& position);
-    static TomlValue  ParseBoolean(const std::string_view& data, size_t& position);
-    static TomlValue  ParseString(const std::string_view& data, size_t& position);
-    static TomlValue  ParseNumber(const std::string_view& data, size_t& position);
-
-    static TomlValue ParseNumberOrDate(const std::string_view& data, size_t& position);
-    static TomlValue ParseArray(const std::string_view& data, size_t& position);
-    static TomlValue ParseObject(const std::string_view& data, size_t& position);
-
-    static std::string ParseBasicString(const std::string_view& data, size_t& position);
-    static std::string ParseMultiBasicString(const std::string_view& data, size_t& position);
-    static std::string ParseLiteralString(const std::string_view& data, size_t& position);
-    static std::string ParseMultiLiteralString(const std::string_view& data, size_t& position);
-
-    static std::string ParseUnicodeString(const std::string_view& data, size_t& position);
-
-    static bool LooksLikeDateTime(const std::string_view& data, size_t position);
-    static bool MatchFullDateTime(const std::string_view& data);
-
-  private:
-    static void
-    StringifyObject(const TomlObject& object, std::ostringstream& oss, const std::string& prefix);
-
-    static void StringifyObject(const TomlValue& value, std::ostringstream& oss);
-
-    static void StringifyValue(const TomlValue& value, std::ostringstream& oss);
-    static void StringifyBoolean(const TomlValue& value, std::ostringstream& oss);
-    static void StringifyInteger(const TomlValue& value, std::ostringstream& oss);
-    static void StringifyDouble(const TomlValue& value, std::ostringstream& oss);
-    static bool StringIsBareKey(const std::string& s);
-    static void StringifyString(const TomlValue& value, std::ostringstream& oss);
-    static void StringifyString(const std::string& s, std::ostringstream& oss);
-    static void StringifyDate(const TomlValue& value, std::ostringstream& oss);
-    static void StringifyArray(const TomlValue& value, std::ostringstream& oss);
-    static void StringifyInlineObject(const TomlObject& obj, std::ostringstream& oss);
-    static bool IsArrayOfTables(const TomlValue& value);
 };
 
 // 容器序列化支持
@@ -793,7 +757,6 @@ TomlValue toToml(const Map& map) {
     }
     return result;
 }
-
 /**
  * @brief 将字符串字面量转为TomlValue
  * @param data 字符串指针
@@ -802,7 +765,7 @@ TomlValue toToml(const Map& map) {
  * @note 解析调用TomlParser::parse且不支持任何扩展
  */
 inline TomlValue operator""_Toml(const char* data, size_t length) {
-    return TomlParser::Parse({data, length});
+    return parser::Parse({data, length});
 }
 }  // namespace cctoml
 

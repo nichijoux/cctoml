@@ -30,4 +30,4 @@ target_include_directories(cctoml
 
 # 添加示例
 add_subdirectory(examples)
-#add_subdirectory(test)
+add_subdirectory(test)

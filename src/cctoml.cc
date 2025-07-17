@@ -7,93 +7,225 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
-#include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <variant>
 
 namespace cctoml {
 
+#define IS_DIGIT(c) ('0' <= (c) && (c) <= '9')
+
+bool TomlDate::parseTimePart(const std::string_view& sv, size_t& position) {
+    // 解析时间部分 hh:mm:ss
+    auto hour = parseDigits(sv, position, 2);
+    if (!hour || *hour > 23 || position >= sv.size() || sv[position] != ':') {
+        return false;
+    }
+    position++;
+    // 解析分钟
+    auto minute = parseDigits(sv, position, 2);
+    if (!minute || *minute > 59 || position >= sv.size() || sv[position] != ':') {
+        return false;
+    }
+    position++;
+    // 解析秒
+    auto second = parseDigits(sv, position, 2);
+    if (!second || *second > 59) {
+        return false;
+    }
+
+    // 存储时间部分
+    m_hour   = hour;
+    m_minute = minute;
+    m_second = second;
+    m_type   = TomlDateTimeType::LOCAL_DATE_TIME;
+
+    // 解析可选的亚秒部分
+    if (position < sv.size() && sv[position] == '.') {
+        position++;
+        parseSubSecond(sv, position);
+    }
+
+    // 解析可选的时区偏移
+    if (position < sv.size()) {
+        parseTimezoneOffset(sv, position);
+    }
+
+    // 必须完全匹配整个字符串
+    return position == sv.size();
+}
+
+void TomlDate::parseSubSecond(const std::string_view& sv, size_t& position) {
+    const size_t fracStart = position;
+    while (position < sv.size() && IS_DIGIT(sv[position])) {
+        position++;
+    }
+
+    if (position == fracStart) {
+        throw std::invalid_argument("'.' must be followed by digits in string: " + std::string(sv));
+    }
+
+    // 提取小数部分并转换为纳秒
+    std::string sub(sv.substr(fracStart, position - fracStart));
+    sub.resize(9, '0');  // 补零至9位(纳秒精度)
+
+    int64_t subSecond = 0;
+    if (auto [ptr, ec] = std::from_chars(sub.data(), sub.data() + sub.size(), subSecond);
+        ec != std::errc()) {
+        throw std::invalid_argument("Invalid fractional second in string: " + std::string(sv));
+    }
+
+    m_subSecond = std::chrono::nanoseconds(subSecond);
+}
+
+void TomlDate::parseTimezoneOffset(const std::string_view& sv, size_t& position) {
+    const char offsetChar = sv[position];
+
+    if (offsetChar == 'Z' || offsetChar == 'z') {
+        position++;
+        m_tzOffset = std::chrono::minutes(0);
+        m_type     = TomlDateTimeType::OFFSET_DATE_TIME;
+        return;
+    }
+
+    if (offsetChar != '+' && offsetChar != '-') {
+        return;  // 没有时区信息，保持当前类型
+    }
+
+    position++;
+
+    // 解析时区偏移 ±HH:MM
+    auto offsetHour = parseDigits(sv, position, 2);
+    if (!offsetHour || *offsetHour > 23 || position >= sv.size() || sv[position] != ':') {
+        throw std::invalid_argument("Invalid timezone offset hour in string: " + std::string(sv));
+    }
+    position++;
+
+    auto offsetMinute = parseDigits(sv, position, 2);
+    if (!offsetMinute || *offsetMinute > 59) {
+        throw std::invalid_argument("Invalid timezone offset minute in string: " + std::string(sv));
+    }
+
+    const int sign = (offsetChar == '+') ? 1 : -1;
+    m_tzOffset     = std::chrono::minutes(sign * (*offsetHour * 60 + *offsetMinute));
+    m_type         = TomlDateTimeType::OFFSET_DATE_TIME;
+}
+
+std::optional<int> TomlDate::parseDigits(const std::string_view& sv, size_t& position, int count) {
+    if (position + count > sv.size()) {
+        return std::nullopt;
+    }
+
+    int value = 0;
+    for (int i = 0; i < count; ++i) {
+        const char c = sv[position + i];
+        if (!IS_DIGIT(c)) {
+            return std::nullopt;
+        }
+        value = value * 10 + (c - '0');
+    }
+
+    position += count;
+    return value;
+}
+
+bool TomlDate::parseLocalTime(const std::string_view& sv) {
+    size_t position = 0;
+
+    // 解析时间部分 hh:mm:ss
+    auto hour = parseDigits(sv, position, 2);
+    if (!hour || *hour > 23 || position >= sv.size() || sv[position] != ':') {
+        return false;
+    }
+    position++;
+
+    auto minute = parseDigits(sv, position, 2);
+    if (!minute || *minute > 59 || position >= sv.size() || sv[position] != ':') {
+        return false;
+    }
+    position++;
+
+    auto second = parseDigits(sv, position, 2);
+    if (!second || *second > 59) {
+        return false;
+    }
+
+    // 存储时间部分
+    m_hour   = hour;
+    m_minute = minute;
+    m_second = second;
+    m_type   = TomlDateTimeType::LOCAL_TIME;
+
+    // 解析可选的亚秒部分
+    if (position < sv.size() && sv[position] == '.') {
+        position++;
+        parseSubSecond(sv, position);
+    }
+
+    // 必须完全匹配整个字符串
+    return position == sv.size();
+}
+
+bool TomlDate::parseDateTimeWithDate(const std::string_view& sv) {
+    size_t       position        = 0;
+    const size_t initialPosition = position;
+
+    // 解析日期部分 YYYY-MM-DD
+    auto year = parseDigits(sv, position, 4);
+    if (!year || position >= sv.size() || sv[position] != '-') {
+        return false;
+    }
+    position++;
+
+    auto month = parseDigits(sv, position, 2);
+    if (!month || *month < 1 || *month > 12 || position >= sv.size() || sv[position] != '-') {
+        return false;
+    }
+    position++;
+
+    auto day = parseDigits(sv, position, 2);
+    if (!day || *day < 1 || *day > 31) {
+        return false;
+    }
+
+    // 存储日期部分
+    m_year  = year;
+    m_month = month;
+    m_day   = day;
+    m_type  = TomlDateTimeType::LOCAL_DATE;
+
+    // 日期后无内容，解析成功
+    if (position == sv.size()) {
+        return true;
+    }
+
+    // 检查日期和时间之间的分隔符
+    if (sv[position] != 'T' && sv[position] != 't' && sv[position] != ' ') {
+        throw std::invalid_argument("Invalid separator after date in string: " + std::string(sv));
+    }
+    position++;
+
+    // 解析时间部分
+    return parseTimePart(sv, position);
+}
+
 void TomlDate::parse(const std::string& s) {
-    // 正则表达式捕获组索引:
-    // 1: 年, 2: 月, 3: 日
-    // 4: 时, 5: 分, 6: 秒
-    // 7: 亚秒 (不包含'.')
-    // 8: 时区 (Z, +, -)
-    // 9: 时区时, 10: 时区分
-
-    // 1. Offset Date-Time (最具体)
-    static const std::regex offset_dt_re(
-        R"((\d{4})-(\d{2})-(\d{2})[Tt ](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?([Zz]|([+-])(\d{2}):(\d{2})))");
-    std::smatch m;
-    if (std::regex_match(s, m, offset_dt_re)) {
-        m_type   = TomlDateTimeType::OFFSET_DATE_TIME;
-        m_year   = std::stoi(m[1]);
-        m_month  = std::stoi(m[2]);
-        m_day    = std::stoi(m[3]);
-        m_hour   = std::stoi(m[4]);
-        m_minute = std::stoi(m[5]);
-        m_second = std::stoi(m[6]);
-        if (m[7].matched) {
-            std::string sub = m[7].str();
-            sub.resize(9, '0');  // 补全到纳秒精度
-            m_subSecond = std::chrono::nanoseconds(std::stoll(sub));
-        }
-        if (m[8].str() == "Z" || m[8].str() == "z") {
-            m_tzOffset = std::chrono::minutes(0);
-        } else {
-            int sign   = (m[9].str() == "+") ? 1 : -1;
-            int h      = std::stoi(m[10]);
-            int min    = std::stoi(m[11]);
-            m_tzOffset = std::chrono::minutes(sign * (h * 60 + min));
-        }
+    // 为确保重入安全，先清空所有可选成员
+    this->reset();
+    // sv
+    const std::string_view sv(s);
+    if (sv.empty()) {
+        throw std::invalid_argument("Cannot parse an empty string.");
+    }
+    // 尝试按优先级解析不同格式
+    if (parseDateTimeWithDate(sv)) {
         return;
     }
-
-    // 2. Local Date-Time
-    static const std::regex local_dt_re(
-        R"((\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?)");
-    if (std::regex_match(s, m, local_dt_re)) {
-        m_type   = TomlDateTimeType::LOCAL_DATE_TIME;
-        m_year   = std::stoi(m[1]);
-        m_month  = std::stoi(m[2]);
-        m_day    = std::stoi(m[3]);
-        m_hour   = std::stoi(m[4]);
-        m_minute = std::stoi(m[5]);
-        m_second = std::stoi(m[6]);
-        if (m[7].matched) {
-            std::string sub = m[7].str();
-            sub.resize(9, '0');
-            m_subSecond = std::chrono::nanoseconds(std::stoll(sub));
-        }
+    if (parseLocalTime(sv)) {
         return;
     }
-
-    // 3. Local Date
-    static const std::regex local_d_re(R"((\d{4})-(\d{2})-(\d{2}))");
-    if (std::regex_match(s, m, local_d_re)) {
-        m_type  = TomlDateTimeType::LOCAL_DATE;
-        m_year  = std::stoi(m[1]);
-        m_month = std::stoi(m[2]);
-        m_day   = std::stoi(m[3]);
-        return;
-    }
-
-    // 4. Local Time
-    static const std::regex local_t_re(R"((\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?)");
-    if (std::regex_match(s, m, local_t_re)) {
-        m_type   = TomlDateTimeType::LOCAL_TIME;
-        m_hour   = std::stoi(m[1]);
-        m_minute = std::stoi(m[2]);
-        m_second = std::stoi(m[3]);
-        if (m[4].matched) {
-            std::string sub = m[4].str();
-            sub.resize(9, '0');
-            m_subSecond = std::chrono::nanoseconds(std::stoll(sub));
-        }
-        return;
-    }
-
+    // 所有解析尝试均失败
+    this->reset();
     throw std::invalid_argument("String does not match any valid TOML date/time format: " + s);
 }
 
@@ -157,16 +289,28 @@ std::chrono::system_clock::time_point TomlDate::toSystemTimePoint() const {
         throw std::runtime_error("Failed to convert to time_t.");
     }
 
-    auto timepoint = std::chrono::system_clock::from_time_t(time);
+    auto timePoint = std::chrono::system_clock::from_time_t(time);
 
     // Add subseconds and subtract the offset to get the final UTC time_point
     if (m_subSecond.has_value()) {
-        timepoint += *m_subSecond;
+        timePoint += *m_subSecond;
     }
 
-    timepoint -= *m_tzOffset;
+    timePoint -= *m_tzOffset;
 
-    return timepoint;
+    return timePoint;
+}
+
+void TomlDate::reset() {
+    m_type = TomlDateTimeType::INVALID;
+    m_year.reset();
+    m_month.reset();
+    m_day.reset();
+    m_hour.reset();
+    m_minute.reset();
+    m_second.reset();
+    m_subSecond.reset();
+    m_tzOffset.reset();
 }
 
 TomlValue::TomlValue(const TomlValue& other) : m_type(other.m_type) {
@@ -195,7 +339,7 @@ TomlValue& TomlValue::operator=(const TomlValue& other) {
             case TomlType::Boolean: m_value.boolean = other.m_value.boolean; break;
             case TomlType::Integer: m_value.iNumber = other.m_value.iNumber; break;
             case TomlType::Double: m_value.dNumber = other.m_value.dNumber; break;
-            case TomlType::String: m_value.string = new std::string(*other.m_value.string); break;
+            case TomlType::String: m_value.string = new TomlString(*other.m_value.string); break;
             case TomlType::Date: m_value.date = new TomlDate(*other.m_value.date); break;
             case TomlType::Array: m_value.array = new TomlArray(*other.m_value.array); break;
             case TomlType::Object: m_value.object = new TomlObject(*other.m_value.object); break;
@@ -283,10 +427,6 @@ TomlValue::operator std::string() const {
     return *m_value.string;
 }
 
-std::string TomlValue::toString() const {
-    return TomlParser::Stringify(*this);
-}
-
 void TomlValue::destroyValue() noexcept {
     switch (m_type) {
         // 动态分配的内存
@@ -334,7 +474,7 @@ TomlValue& TomlValue::push_back(const TomlValue& value) {
 #define SKIP_WHITESPACE(data, position)                                                            \
     do {                                                                                           \
         /* 边界检查 && 当前字符是空白 */                                                \
-        while (position < data.size() && std::isspace(data[position])) {                           \
+        while (position < data.size() && (data[position] == ' ' || data[position] == '\t')) {      \
             position++; /* 移动到下一个字符 */                                             \
         }                                                                                          \
     } while (false)
@@ -347,15 +487,14 @@ TomlValue& TomlValue::push_back(const TomlValue& value) {
  * @note 先跳过空白，再处理注释
  * @note 注释以#开始直到行尾（\\n或\\r）
  */
-#define SKIP_USELESS_CHAR(data, position)                                                          \
+#define SKIP_WHITESPACE_AND_COMMENT(data, position)                                                \
     do {                                                                                           \
         while (position < data.size()) {                                                           \
             /* 1. 先跳过普通空白 */                                                         \
             SKIP_WHITESPACE(data, position);                                                       \
-                                                                                                   \
             /* 2. 检查是否遇到注释 */                                                      \
             if (position < data.size() && data[position] == '#') {                                 \
-                /* 跳过整行注释 */                                                           \
+                /* 跳过整行注释,但不换行 */                                              \
                 while (position < data.size() && data[position] != '\n' &&                         \
                        data[position] != '\r') {                                                   \
                     position++;                                                                    \
@@ -367,189 +506,100 @@ TomlValue& TomlValue::push_back(const TomlValue& value) {
         }                                                                                          \
     } while (false)
 
-TomlValue TomlParser::Parse(std::string_view data) {
-    size_t    position = 0;
-    TomlValue root;
-    // 按行解析
-    size_t size = data.size();
-    // 1. 先解析顶层内容
-    SKIP_USELESS_CHAR(data, position);
-    if (position < size && data[position] != '[') {
-        std::vector<std::pair<std::vector<std::string>, TomlValue>> keyValues;
-        while (position < data.size()) {
-            SKIP_USELESS_CHAR(data, position);
-            // 如果遇到新的table或者已经没有内容了
-            if (position >= data.size() || data[position] == '[') {
-                break;
-            }
-            // 解析key-value
-            keyValues.emplace_back(ParseKeyValue(data, position));
-            SKIP_USELESS_CHAR(data, position);
-        }
-        // 根据表头添加数据
-        // 对于当前节点赋值
-        for (const auto& [k, v] : keyValues) {
-            TomlValue* node = &root;
-            for (size_t i = 0; i < k.size() - 1; i++) {
-                if (node->isObject()) {
-                    node = &(*node)[k[i]];
-                } else {
-                    throw TomlException("node is not a object");
-                }
-            }
-            if (node->isObject()) {
-                node->set(k.back(), v);
-            } else {
-                throw TomlParseException("not a object", position);
-            }
-        }
-    }
-    // 2. 解析[]中的内容
-    while (position < size) {
-        // 跳过无用字符串
-        std::vector<std::string> headers;
-        bool                     isArray = false;
-        SKIP_USELESS_CHAR(data, position);
-        if (position < size && data[position] == '[') {
-            if (position + 1 < size && data[position + 1] == '[') {
-                // 数组类型
-                isArray = true;
-            }
-            // 解析表头
-            headers = ParseTableHeader(data, position, isArray);
-        } else if (position >= size) {
-            break;
-        }
-        // 解析下面的key-value
-        std::vector<std::pair<std::vector<std::string>, TomlValue>> keyValues;
-        while (position < data.size()) {
-            SKIP_USELESS_CHAR(data, position);
-            // 如果遇到新的table或者已经没有内容了
-            if (position >= data.size() || data[position] == '[') {
-                break;
-            }
-            // 解析key-value
-            keyValues.emplace_back(ParseKeyValue(data, position));
-        }
-        // 根据表头添加数据
-        TomlValue* node = &root;
-        for (size_t i = 0; i < headers.size() - 1; i++) {
-            if (node->isObject()) {
-                node = &(*node)[headers[i]];
-            } else if (node->isArray()) {
-                auto& array = node->asArray();
-                // 获取node的一个back
-                if (array.empty()) {
-                    // 创建一个object推入node中
-                    TomlObject object;
-                    object[headers[i]];
-                    array.emplace_back(object);
-                } else {
-                    bool ok = false;
-                    for (auto it = array.rbegin(); it != array.rend(); ++it) {
-                        if (it->isObject()) {
-                            ok = true;
-                            if (it->asObject().find(headers.back()) == it->asObject().end()) {
-                                if (isArray) {
-                                    it->set(headers.back(), TomlArray());
-                                } else {
-                                    it->set(headers.back(), TomlValue());
-                                }
-                            }
-                            break;
-                        }
-                    }
-                    if (!ok) {
-                        TomlObject object;
-                        object[headers.back()];
-                        array.emplace_back(object);
-                    }
-                }
-                node = &(node->asArray().back()[headers.back()]);
-            }
-        }
-        // 是array
-        if (isArray) {
-            if (node->isObject() &&
-                node->asObject().find(headers.back()) == node->asObject().end()) {
-                node->set(headers.back(), TomlArray());
-            }
-        }
-        // 如果不存在则会创建一个object
-        if (node->isObject()) {
-            node = &(*node)[headers.back()];
-        } else if (node->isArray()) {
-            // 获取node的一个back
-            auto& array = node->asArray();
-            if (array.empty()) {
-                // 创建一个object推入node中
-                TomlObject object;
-                object[headers.back()];
-                array.emplace_back(object);
-            } else {
-                // 数组不为空
-                bool ok = false;
-                for (auto it = array.rbegin(); it != array.rend(); ++it) {
-                    if (it->isObject()) {
-                        ok = true;
-                        if (it->asObject().find(headers.back()) == it->asObject().end()) {
-                            if (isArray) {
-                                it->set(headers.back(), TomlArray());
-                            } else {
-                                it->set(headers.back(), TomlValue());
-                            }
-                        }
-                        break;
-                    }
-                }
-                if (!ok) {
-                    TomlObject object;
-                    object[headers.back()];
-                    array.emplace_back(object);
-                }
-            }
-            node = &(node->asArray().back()[headers.back()]);
-        }
-        if (node->isArray() != isArray) {
-            throw TomlParseException("node is not a array", position);
-        }
-        // 对于当前节点赋值
-        if (node->isArray()) {
-            // node是一个数组
-            if (keyValues.empty()) {
-                node->push_back(TomlValue());
-            } else {
-                // 新的数组对象
-                TomlValue parent;
-                for (const auto& [ks, v] : keyValues) {
-                    TomlValue* tempNode = &parent;
-                    for (size_t i = 0; i < ks.size() - 1; i++) {
-                        tempNode = &(*tempNode)[ks[i]];
-                    }
-                    tempNode->set(ks.back(), v);
-                }
-                node->push_back(parent);
-            }
-        } else {
-            // 对象
-            for (const auto& [ks, v] : keyValues) {
-                auto tempNode = node;
-                for (size_t i = 0; i < ks.size() - 1; i++) {
-                    tempNode = &(*tempNode)[ks[i]];
-                }
-                tempNode->set(ks.back(), v);
-            }
-        }
-    }
-    // 跳过无用字符串
-    SKIP_USELESS_CHAR(data, position);
-    if (position != data.size()) {
-        throw TomlParseException("Unexpected content after Toml value", position);
-    }
-    return root;
-}
+/**
+ * @brief 跳过行结束符（\\r\\n或者\\n）
+ * @param data 输入的字符串数据（可以是std::string或std::string_view）
+ * @param position 当前读取位置（会被修改）
+ *
+ * @note 先检查是否为\\r，若是则跳过；再检查是否为\\n，若是则跳过
+ * @note 可处理\\r\\n、\\r、\\n等不同换行风格
+ */
+#define SKIP_CRLF(data, position)                                                                  \
+    do {                                                                                           \
+        if (position < data.size() && data[position] == '\r') {                                    \
+            ++position;                                                                            \
+        }                                                                                          \
+        if (position < data.size() && data[position] == '\n') {                                    \
+            ++position;                                                                            \
+        }                                                                                          \
+    } while (false)
 
-TomlValue TomlParser::ParseBoolean(const std::string_view& data, size_t& position) {
+/**
+ * @brief 跳过所有无用字符（空白、注释、换行符）
+ * @param data 输入的字符串数据
+ * @param position 当前读取位置（会被修改）
+ *
+ * @note 依次执行：跳过空白 → 处理注释 → 处理换行符
+ * @note 循环执行直到无法继续跳过字符（位置不再变化）
+ * @note 注释以#开始直到行尾（\\n或\\r）
+ */
+#define SKIP_USELESS_CHAR(data, position)                                                          \
+    do {                                                                                           \
+        while (position < data.size()) {                                                           \
+            /* 记录本次循环开始的位置 */                                                \
+            size_t currentStart = position;                                                        \
+            /* 跳过空白 */                                                                     \
+            SKIP_WHITESPACE(data, position);                                                       \
+            /* 跳过注释，但不跳过换行 */                                                \
+            if (position < data.size() && data[position] == '#') {                                 \
+                while (position < data.size() && data[position] != '\n' &&                         \
+                       data[position] != '\r') {                                                   \
+                    position++;                                                                    \
+                }                                                                                  \
+            }                                                                                      \
+            /* 处理换行 */                                                                     \
+            SKIP_CRLF(data, position);                                                             \
+            /* 如果本轮没有移动position，则退出循环 */                               \
+            if (position <= currentStart) {                                                        \
+                break;                                                                             \
+            }                                                                                      \
+        }                                                                                          \
+    } while (false)
+
+static TomlValue ParseBoolean(const std::string_view& data, size_t& position);
+static std::vector<std::string>
+ParseTableHeader(const std::string_view& data, size_t& position, bool isArray);
+static TomlString
+ParseBareKey(const std::string_view& data, size_t& position, bool isTable = false);
+static TomlString ParseQuotedKeys(const std::string_view& data, size_t& position);
+static std::pair<std::vector<TomlString>, TomlValue> ParseKeyValue(const std::string_view& data,
+                                                                   size_t& position);
+static TomlValue   ParseValue(const std::string_view& data, size_t& position);
+static TomlValue   ParseNumber(const std::string_view& data, size_t& position);
+static TomlValue   ParseNumberOrDate(const std::string_view& data, size_t& position);
+static TomlValue   ParseArray(const std::string_view& data, size_t& position);
+static TomlValue   ParseObject(const std::string_view& data, size_t& position);
+static TomlValue   ParseString(const std::string_view& data, size_t& position);
+static std::string ParseUnicodeString(const std::string_view& data, size_t& position);
+static std::string ParseBasicString(const std::string_view& data, size_t& position);
+static std::string ParseMultiBasicString(const std::string_view& data, size_t& position);
+static std::string ParseLiteralString(const std::string_view& data, size_t& position);
+static std::string ParseMultiLiteralString(const std::string_view& data, size_t& position);
+/**
+ * @brief 快速检查字符串的某个位置是否“看起来像”一个TOML日期或时间的开始。
+ *
+ * 这是一个高性能的启发式检查，不进行完整验证。<br/>
+ * 它只检查两种模式：<br/>
+ * 1. "YYYY-" (4个数字后跟'-') -> 可能是日期或日期时间<br/>
+ * 2. "hh:" (2个数字后跟':') -> 可能是时间
+ *
+ * @param sv 要检查的字符串视图。
+ * @param position 开始检查的索引位置。
+ * @return 如果看起来像日期或时间，则为 true，否则为 false。
+ */
+static bool LooksLikeDateTime(const std::string_view& sv, size_t position) noexcept;
+/**
+ * @brief 精确、高性能地验证一个字符串视图是否完全匹配TOML的四种日期时间格式之一。
+ *
+ * 此函数为自包含的单函数实现，严格遵循TOML v1.0.0规范，<br/>
+ * 其中包括允许使用 'T', 't', 或空格作为日期和时间的分隔符。
+ *
+ * @param data 要验证的完整字符串视图。
+ * @return 如果完全匹配，则为 true，否则为 false。
+ */
+static bool MatchFullDateTime(const std::string_view& data) noexcept;
+
+TomlValue ParseBoolean(const std::string_view& data, size_t& position) {
     // 当前字符一定为t或f
     if (data.substr(position, 4) == "true") {
         position += 4;
@@ -562,50 +612,44 @@ TomlValue TomlParser::ParseBoolean(const std::string_view& data, size_t& positio
 }
 
 std::vector<std::string>
-TomlParser::ParseTableHeader(const std::string_view& data, size_t& position, bool isArray) {
+ParseTableHeader(const std::string_view& data, size_t& position, bool isArray) {
     // 当前字符一定为[,跳过表头
     position++;
     position += isArray;
     std::vector<std::string> headers;
     auto                     size = data.size();
-    SKIP_WHITESPACE(data, position);
-    if (position < size && (data[position] == '"' || data[position] == '\'')) {
-        headers.emplace_back(ParseQuotedKeys(data, position));
-    } else if (position < size) {
-        // 开头是bareKey
-        while (position < size) {
-            SKIP_WHITESPACE(data, position);
-            if (position < size && (data[position] == '"' || data[position] == '\'')) {
-                headers.emplace_back(ParseQuotedKeys(data, position));
-            } else {
-                headers.emplace_back(ParseBareKey(data, position, true));
-            }
-            // 跳过空白字符
-            SKIP_WHITESPACE(data, position);
-            // 检查是否有点分隔符
-            if (position < size && data[position] == '.') {
-                position++;
-            } else {
-                break;
-            }
+    // 解析key
+    while (position < size) {
+        SKIP_WHITESPACE(data, position);
+        if (position < size && (data[position] == '"' || data[position] == '\'')) {
+            headers.emplace_back(ParseQuotedKeys(data, position));
+        } else {
+            headers.emplace_back(ParseBareKey(data, position, true));
+        }
+        // 跳过空白字符
+        SKIP_WHITESPACE(data, position);
+        // 检查是否有点分隔符
+        if (position < size && data[position] == '.') {
+            position++;
+        } else {
+            break;
         }
     }
     position++;
     // 如果是数组则还需要移动一次
     position += isArray;
-    SKIP_USELESS_CHAR(data, position);
     return headers;
 }
 
-TomlString TomlParser::ParseBareKey(const std::string_view& data, size_t& position, bool isTable) {
+TomlString ParseBareKey(const std::string_view& data, size_t& position, bool isTable) {
     auto start = position;
     while (position < data.size()) {
         char c = data[position];
         if (std::isalnum(c) || c == '_' || c == '-') {
             position++;
-        } else if (std::isspace(c) || c == '.' || (isTable && c == ']')) {
+        } else if (c == '=' || c == ' ' || c == '\t' || c == '.' || (isTable && c == ']')) {
             // 结束了
-            return std::string(data.substr(start, position - start));
+            return TomlString(data.substr(start, position - start));
         } else {
             break;
         }
@@ -613,71 +657,35 @@ TomlString TomlParser::ParseBareKey(const std::string_view& data, size_t& positi
     throw TomlParseException("Unexpected content after Toml value", position);
 }
 
-TomlString TomlParser::ParseQuotedKeys(const std::string_view& data, size_t& position) {
-    // 当前字符串一定为"或者'
-    // 跳过开头的"或者'
-    char       end = data[position++];
-    TomlString result;
-    result.reserve(32);  // 初始预留空间，避免频繁扩容
-    // 读取后面的字符串
-    while (position < data.size()) {
-        char c = data[position++];
-        if (c == end) {
-            return result;
-        } else if (c == '\\') {
-            // 如果c为\,说明遇到了转义字符
-            if (position >= data.size()) {
-                throw TomlParseException("Unexpected end of string", position);
-            }
-            // 转义字符后的字符
-            c = data[position++];
-            switch (c) {
-                case '"': result += '"'; break;
-                case '\\': result += '\\'; break;
-                case '/': result += '/'; break;
-                case 'b': result += '\b'; break;
-                case 'f': result += '\f'; break;
-                case 'n': result += '\n'; break;
-                case 'r': result += '\r'; break;
-                case 't': result += '\t'; break;
-                case 'u':
-                case 'U': result += ParseUnicodeString(data, position); break;
-                default: throw TomlParseException("Invalid escape sequence", position);
-            }
-        } else {
-            result += c;
-        }
+TomlString ParseQuotedKeys(const std::string_view& data, size_t& position) {
+    if (data[position] == '"') {
+        return ParseBasicString(data, position);
+    } else {
+        return ParseLiteralString(data, position);
     }
-    // 异常
-    throw TomlParseException("Unexpected end of string", position);
 }
 
-std::pair<std::vector<TomlString>, TomlValue>
-TomlParser::ParseKeyValue(const std::string_view& data, size_t& position) {
+std::pair<std::vector<TomlString>, TomlValue> ParseKeyValue(const std::string_view& data,
+                                                            size_t&                 position) {
+    // 当前data[position]一定有意义
     std::vector<TomlString> keys;
     auto                    size = data.size();
-    if (position < size && (data[position] == '"' || data[position] == '\'')) {
-        keys.emplace_back(ParseQuotedKeys(data, position));
-    } else if (position < size) {
-        // 开头是bareKey
-        while (position < size) {
-            SKIP_WHITESPACE(data, position);
-            if (position < size && (data[position] == '"' || data[position] == '\'')) {
-                keys.emplace_back(ParseQuotedKeys(data, position));
-            } else {
-                keys.emplace_back(ParseBareKey(data, position));
-            }
-            // 跳过空白字符
-            SKIP_WHITESPACE(data, position);
-            // 检查是否有点分隔符
-            if (position < size && data[position] == '.') {
-                position++;
-            } else {
-                break;
-            }
+    // 解析key
+    while (position < size) {
+        SKIP_WHITESPACE(data, position);
+        if (position < size && (data[position] == '"' || data[position] == '\'')) {
+            keys.emplace_back(ParseQuotedKeys(data, position));
+        } else {
+            keys.emplace_back(ParseBareKey(data, position));
         }
-    } else {
-        return {};
+        // 跳过空白字符
+        SKIP_WHITESPACE(data, position);
+        // 检查是否有点分隔符,有则继续解析
+        if (position < size && data[position] == '.') {
+            position++;
+        } else {
+            break;
+        }
     }
     // 跳过空白，直到遇到=
     SKIP_WHITESPACE(data, position);
@@ -688,71 +696,36 @@ TomlParser::ParseKeyValue(const std::string_view& data, size_t& position) {
     }
     // 解析value
     auto value = ParseValue(data, position);
-    SKIP_USELESS_CHAR(data, position);
+    SKIP_WHITESPACE_AND_COMMENT(data, position);
+    // 换行
+    SKIP_CRLF(data, position);
     return {keys, value};
 }
 
-TomlValue TomlParser::ParseValue(const std::string_view& data, size_t& position) {
+TomlValue ParseValue(const std::string_view& data, size_t& position) {
+    // 跳过前面的空白
     SKIP_WHITESPACE(data, position);
+    // 根据当前字符判断是哪种类型
     char c = data[position];
     if (c == '"' || c == '\'') {
         return ParseString(data, position);
-    } else if (c == '+' || c == '-' || std::isdigit(c) || c == 'i' || c == 'n') {
+    } else if (c == '+' || c == '-' || IS_DIGIT(c) || c == 'i' || c == 'n') {
         // 处理inf、nan、数字和日期
         return ParseNumberOrDate(data, position);
     } else if (c == 't' || c == 'f') {
         return ParseBoolean(data, position);
     } else if (c == '[') {
+        // 内联表,不可修改
         return ParseArray(data, position);
     } else if (c == '{') {
+        // 内联表,不可修改
         return ParseObject(data, position);
     } else {
         throw TomlParseException("invalid value", position);
     }
 }
 
-#define MATCH3(sv, pos, ch)                                                                        \
-    ((pos) + 2 < (sv).size() && (sv)[pos] == (ch) && (sv)[(pos) + 1] == (ch) &&                    \
-     (sv)[(pos) + 2] == (ch))
-#define MATCH4(sv, pos, ch)                                                                        \
-    ((pos) + 3 < (sv).size() && (sv)[pos] == (ch) && (sv)[(pos) + 1] == (ch) &&                    \
-     (sv)[(pos) + 2] == (ch) && (sv)[(pos) + 3] == (ch))
-#define MATCH5(sv, pos, ch)                                                                        \
-    ((pos) + 4 < (sv).size() && (sv)[pos] == (ch) && (sv)[(pos) + 1] == (ch) &&                    \
-     (sv)[(pos) + 2] == (ch) && (sv)[(pos) + 3] == (ch) && (sv)[(pos) + 4] == (ch))
-
-#define MATCH6(sv, pos, ch)                                                                        \
-    ((pos) + 5 < (sv).size() && (sv)[pos] == (ch) && (sv)[(pos) + 1] == (ch) &&                    \
-     (sv)[(pos) + 2] == (ch) && (sv)[(pos) + 3] == (ch) && (sv)[(pos) + 4] == (ch) &&              \
-     (sv)[(pos) + 5] == (ch))
-
-TomlValue TomlParser::ParseString(const std::string_view& data, size_t& position) {
-    // 判断是哪种类型
-    char c = data[position];
-    if (MATCH3(data, position, c)) {
-        // " 基本字符串
-        // """ 多行基本字符串
-        // ' 字面字符串
-        // ''' 多行字面字符串
-        if (c == '"') {
-            return ParseMultiBasicString(data, position);
-        } else if (c == '\'') {
-            return ParseMultiLiteralString(data, position);
-        } else {
-            throw TomlParseException("not a string", position);
-        }
-    } else {
-        if (c == '"') {
-            return ParseBasicString(data, position);
-        } else if (c == '\'') {
-            return ParseLiteralString(data, position);
-        } else {
-            throw TomlParseException("not a string", position);
-        }
-    }
-}
-
-TomlValue TomlParser::ParseNumber(const std::string_view& data, size_t& position) {
+TomlValue ParseNumber(const std::string_view& data, size_t& position) {
     size_t start = position;
     size_t size  = data.size();
     // 处理正负号
@@ -783,7 +756,7 @@ TomlValue TomlParser::ParseNumber(const std::string_view& data, size_t& position
         } else if (c == 'x' || c == 'X') {
             base = 16;
             position += 2;
-        } else if (std::isdigit(c)) {
+        } else if (IS_DIGIT(c)) {
             throw TomlParseException("Leading zeros are not allowed", position);
         }
     }
@@ -796,7 +769,7 @@ TomlValue TomlParser::ParseNumber(const std::string_view& data, size_t& position
         switch (base) {
             case 2: return c == '0' || c == '1';
             case 8: return c >= '0' && c <= '7';
-            case 10: return std::isdigit(c);
+            case 10: return IS_DIGIT(c);
             case 16: return std::isxdigit(c);
             default: break;
         }
@@ -811,8 +784,8 @@ TomlValue TomlParser::ParseNumber(const std::string_view& data, size_t& position
         isFloat = true;
         ++scan;
         bool hasFraction = false;
-        while (scan < size && (std::isdigit(data[scan]) || data[scan] == '_')) {
-            if (std::isdigit(data[scan]))
+        while (scan < size && (IS_DIGIT(data[scan]) || data[scan] == '_')) {
+            if (IS_DIGIT(data[scan]))
                 hasFraction = true;
             ++scan;
         }
@@ -827,8 +800,8 @@ TomlValue TomlParser::ParseNumber(const std::string_view& data, size_t& position
         if (scan < size && (data[scan] == '+' || data[scan] == '-'))
             ++scan;
         bool hasExpDigit = false;
-        while (scan < size && (std::isdigit(data[scan]) || data[scan] == '_')) {
-            if (std::isdigit(data[scan]))
+        while (scan < size && (IS_DIGIT(data[scan]) || data[scan] == '_')) {
+            if (IS_DIGIT(data[scan]))
                 hasExpDigit = true;
             ++scan;
         }
@@ -838,6 +811,9 @@ TomlValue TomlParser::ParseNumber(const std::string_view& data, size_t& position
     }
     // 数字部分
     std::string raw(data.substr(position, scan - position));
+    if (isNegative) {
+        raw.insert(0, 1, '-');
+    }
     position = scan;
 
     // 检查下划线合法性
@@ -856,33 +832,36 @@ TomlValue TomlParser::ParseNumber(const std::string_view& data, size_t& position
         if (ec != std::errc()) {
             throw TomlParseException("Invalid float", start);
         }
-        return isNegative ? -result : result;
+        return result;
     } else {
         int64_t result = 0;
         auto [ptr, ec] = std::from_chars(raw.data(), raw.data() + raw.size(), result, base);
         if (ec != std::errc()) {
             throw TomlParseException("Invalid integer", start);
         }
-        return isNegative ? -result : result;
+        return result;
     }
 }
 
-TomlValue TomlParser::ParseNumberOrDate(const std::string_view& data, size_t& position) {
+TomlValue ParseNumberOrDate(const std::string_view& data, size_t& position) {
     size_t original = position;
     // 判断是否为日期
     if (LooksLikeDateTime(data, position)) {
         // 完整匹配
-        size_t end = position;
-        while (end < data.size() && (std::isalnum(data[end]) || data[end] == '-' ||
-                                     data[end] == ':' || data[end] == 'T' || data[end] == 'Z' ||
-                                     data[end] == '+' || data[end] == '.' || data[end] == ' ')) {
+        size_t end         = position;
+        auto   isValidChar = [](char c) -> bool {
+            return std::isalnum(c) || c == '-' || c == ':' || c == 'T' || c == 'Z' || c == '+' ||
+                   c == '.';
+        };
+        while (end < data.size() &&
+               (isValidChar(data[end]) ||
+                (data[end] == ' ' && end + 1 < data.size() && isValidChar(data[end + 1])))) {
             ++end;
         }
         // 可能的日期字符串
         auto maybeDate = data.substr(position, end - position);
         // 判断是否为日期
         if (MatchFullDateTime(maybeDate)) {
-            // todo:使用日期类型
             position = end;
             return TomlDate(maybeDate);
         }
@@ -892,33 +871,53 @@ TomlValue TomlParser::ParseNumberOrDate(const std::string_view& data, size_t& po
     return ParseNumber(data, position);
 }
 
-TomlValue TomlParser::ParseArray(const std::string_view& data, size_t& position) {
+#define SKIP_ALL(data, position)                                                                   \
+    do {                                                                                           \
+        while (position < data.size()) {                                                           \
+            /* 跳过空格、制表符 */                                                         \
+            SKIP_WHITESPACE(data, position);                                                       \
+            /* 注释：跳过整行直到换行符 */                                             \
+            SKIP_WHITESPACE_AND_COMMENT(data, position);                                           \
+            /* 跳过换行符（\r\n 或 \n）*/                                                  \
+            SKIP_CRLF(data, position);                                                             \
+            /* 如果都不是，就 break */                                                      \
+            if (position < data.size() && data[position] != '#' && data[position] != ' ' &&        \
+                data[position] != '\t' && data[position] != '\r' && data[position] != '\n') {      \
+                break;                                                                             \
+            }                                                                                      \
+        }                                                                                          \
+    } while (false)
+
+TomlValue ParseArray(const std::string_view& data, size_t& position) {
     // 当前字符一定为[
     position++;
+    SKIP_ALL(data, position);
     // 解析以,分割的一个个value
     TomlArray array;
     while (position < data.size()) {
-        SKIP_USELESS_CHAR(data, position);
+        SKIP_ALL(data, position);
         if (data[position] == ']') {
             position++;
             break;
         }
-        auto value = ParseValue(data, position);
-        array.emplace_back(value);
-        SKIP_USELESS_CHAR(data, position);
+        array.emplace_back(ParseValue(data, position));
+        SKIP_ALL(data, position);
         if (position < data.size() && data[position] == ',') {
             position++;
         }
+        // 可换行
+        SKIP_ALL(data, position);
     }
     return array;
 }
 
-TomlValue TomlParser::ParseObject(const std::string_view& data, size_t& position) {
+TomlValue ParseObject(const std::string_view& data, size_t& position) {
     // 当前一定为{
     position++;
+    SKIP_CRLF(data, position);
     TomlValue object;
     while (position < data.size()) {
-        SKIP_USELESS_CHAR(data, position);
+        SKIP_WHITESPACE_AND_COMMENT(data, position);
         if (data[position] == '}') {
             position++;
             break;
@@ -926,7 +925,7 @@ TomlValue TomlParser::ParseObject(const std::string_view& data, size_t& position
         // 解析一个个key-value
         auto node    = &object;
         auto [ks, v] = ParseKeyValue(data, position);
-        for (size_t i = 0; i < ks.size() - 1; i++) {
+        for (size_t i = 0; !ks.empty() && i < ks.size() - 1; i++) {
             if (node->isObject()) {
                 node = &(*node)[ks[i]];
             } else {
@@ -938,26 +937,66 @@ TomlValue TomlParser::ParseObject(const std::string_view& data, size_t& position
         } else {
             throw TomlParseException("not a object", position);
         }
-        SKIP_USELESS_CHAR(data, position);
+        SKIP_WHITESPACE_AND_COMMENT(data, position);
         if (position < data.size() && data[position] == ',') {
             position++;
         }
+        SKIP_CRLF(data, position);
     }
     return object;
 }
 
-std::string TomlParser::ParseUnicodeString(const std::string_view& data, size_t& position) {
-    auto parseHex = [&](int length) -> char32_t {
-        if (position + length > data.size()) {
+#undef SKIP_ALL
+
+#define MATCH3(sv, pos, ch)                                                                        \
+    ((pos) + 2 < (sv).size() && (sv)[pos] == (ch) && (sv)[(pos) + 1] == (ch) &&                    \
+     (sv)[(pos) + 2] == (ch))
+
+TomlValue ParseString(const std::string_view& data, size_t& position) {
+    // 判断是哪种类型
+    char c = data[position];
+    if (MATCH3(data, position, c)) {
+        // " 基本字符串
+        // """ 多行基本字符串
+        // ' 字面字符串
+        // ''' 多行字面字符串
+        if (c == '"') {
+            return ParseMultiBasicString(data, position);
+        } else if (c == '\'') {
+            return ParseMultiLiteralString(data, position);
+        } else {
+            throw TomlParseException("not a string", position);
+        }
+    } else {
+        if (c == '"') {
+            return ParseBasicString(data, position);
+        } else if (c == '\'') {
+            return ParseLiteralString(data, position);
+        } else {
+            throw TomlParseException("not a string", position);
+        }
+    }
+}
+
+std::string ParseUnicodeString(const std::string_view& data, size_t& position) {
+    auto parseHex = [&](int length) {
+        if (position + length >= data.size()) {
             throw TomlParseException("Unexpected end in Unicode escape", position);
         }
-        std::string hex(data.substr(position, length));
+        // 获取字符串
+        auto hex = data.substr(position, length);
         position += length;
-        return static_cast<char32_t>(std::stoul(hex, nullptr, 16));
+        int32_t codePoint;
+        auto [ptr, ec] = std::from_chars(hex.data(), hex.data() + hex.size(), codePoint, 16);
+        if (ec != std::errc()) {
+            throw TomlParseException("Invalid hexadecimal string " + std::string(hex), position);
+        }
+        return codePoint;
     };
-
-    auto     hexLength = data[position++] == 'u' ? 4 : 8;
-    char32_t codePoint = parseHex(hexLength);
+    // 获取unicode位数
+    auto hexLength = data[position++] == 'u' ? 4 : 8;
+    // 解析出码点
+    auto codePoint = parseHex(hexLength);
 
     std::string result;
     if (codePoint <= 0x7F) {
@@ -975,11 +1014,10 @@ std::string TomlParser::ParseUnicodeString(const std::string_view& data, size_t&
         result += static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F));
         result += static_cast<char>(0x80 | (codePoint & 0x3F));
     }
-
     return result;
 }
 
-std::string TomlParser::ParseBasicString(const std::string_view& data, size_t& position) {
+std::string ParseBasicString(const std::string_view& data, size_t& position) {
     ++position;
 
     std::string result;
@@ -1006,6 +1044,7 @@ std::string TomlParser::ParseBasicString(const std::string_view& data, size_t& p
                 case '\\': result += '\\'; break;
                 case 'u':
                 case 'U':
+                    // 回退为\u
                     --position;
                     result += ParseUnicodeString(data, position);
                     break;
@@ -1017,22 +1056,14 @@ std::string TomlParser::ParseBasicString(const std::string_view& data, size_t& p
             ++position;
         }
     }
-
-    throw std::runtime_error("Unterminated basic string");
+    throw TomlParseException("Unterminated basic string", position);
 }
 
-std::string TomlParser::ParseMultiBasicString(const std::string_view& data, size_t& position) {
+std::string ParseMultiBasicString(const std::string_view& data, size_t& position) {
     // 此时当前字符串一定为"""
     position += 3;
     // 跳过开头的换行符（如果存在）
-    if (position < data.size()) {
-        if (data[position] == '\r') {
-            ++position;
-        }
-        if (position < data.size() && data[position] == '\n') {
-            ++position;
-        }
-    }
+    SKIP_CRLF(data, position);
     std::string result;
     bool        inEscape = false;  // 标记是否处于转义状态
     while (position < data.size()) {
@@ -1044,8 +1075,7 @@ std::string TomlParser::ParseMultiBasicString(const std::string_view& data, size
             if (position + 3 < data.size() && data[position + 3] == '"') {
                 // 将当前两个字符视为普通字符即可
                 // 说明后面还有",当前data[position]其实可能被视为普通字符,所允许的最大也不过为2+3
-                if (!(MATCH4(data, position, '"') || MATCH5(data, position, '"')) ||
-                    MATCH6(data, position, '"')) {
+                if (position + 5 < data.size() && data[position + 5] == '"') {
                     throw TomlParseException("not allow 3 \" in multi-basic string", position);
                 }
             } else {
@@ -1055,20 +1085,16 @@ std::string TomlParser::ParseMultiBasicString(const std::string_view& data, size
         }
         char c = data[position++];
         if (c == '\\' && !inEscape) {
-            if (position < data.size() && (data[position] == '\r' || data[position] == '\n')) {
+            if (position < data.size() && (data[position] == '\r' || data[position] == '\n' ||
+                                           data[position] == ' ' || data[position] == '\t')) {
                 // 遇到了toml语法中的\换行
                 // 当一行的最后一个非空白字符是未被转义的
                 // \ 时，它会连同它后面的所有空白（包括换行）一起被去除，直到下一个非空白字符或结束引号为止。
-                // 处理行尾转义
-                if (position < data.size() && data[position] == '\r') {
-                    ++position;
-                }
-                if (position < data.size() && data[position] == '\n') {
-                    ++position;
-                }
-                // 跳过行尾后的所有空白
-                while (position < data.size() && std::isspace(data[position])) {
-                    ++position;
+                // 处理\后面的空白
+                while (position < data.size() &&
+                       (data[position] == '\r' || data[position] == '\n' || data[position] == ' ' ||
+                        data[position] == '\t')) {
+                    position++;
                 }
             } else {
                 inEscape = true;  // 普通转义字符，下一个字符特殊处理
@@ -1101,9 +1127,9 @@ std::string TomlParser::ParseMultiBasicString(const std::string_view& data, size
     throw TomlParseException("Unterminated multi-line basic string", position);
 }
 
-std::string TomlParser::ParseLiteralString(const std::string_view& data, size_t& position) {
+std::string ParseLiteralString(const std::string_view& data, size_t& position) {
+    // 跳过开头的'
     ++position;
-
     std::string result;
     while (position < data.size()) {
         char c = data[position];
@@ -1118,86 +1144,387 @@ std::string TomlParser::ParseLiteralString(const std::string_view& data, size_t&
     throw TomlParseException("Unterminated literal string", position);
 }
 
-std::string TomlParser::ParseMultiLiteralString(const std::string_view& data, size_t& position) {
+std::string ParseMultiLiteralString(const std::string_view& data, size_t& position) {
     position += 3;
     // 跳过开头的换行符（如果存在）
-    if (position < data.size()) {
-        if (data[position] == '\r') {
-            ++position;
-        }
-        if (position < data.size() && data[position] == '\n') {
-            ++position;
-        }
-    }
+    SKIP_CRLF(data, position);
     std::string result;
+    result.reserve(32);
     while (position < data.size()) {
         if (MATCH3(data, position, '\'')) {
             // 已经遇到了三个引号,但却不一定结束
-            // 将当前两个字符视为普通字符即可
             // 说明后面还有",当前data[position]其实可能被视为普通字符,所允许的最大也不过为2+3
             if (position + 3 < data.size() && data[position + 3] == '\'') {
                 // 将当前两个字符视为普通字符即可
-                // 说明后面还有",当前data[position]其实可能被视为普通字符,所允许的最大也不过为2+3
-                if (!(MATCH4(data, position, '\'') || MATCH5(data, position, '\'')) ||
-                    MATCH6(data, position, '\'')) {
+                if (position + 5 < data.size() && data[position + 5] == '\'') {
                     throw TomlParseException("not allow 3 ' in multi-literal string", position);
                 }
             } else {
+                // 结束了
                 position += 3;
                 return result;
             }
         }
         result += data[position++];
     }
-
-    throw std::runtime_error("Unterminated multi-line literal string");
+    throw TomlParseException("Unterminated multi-line literal string", position);
 }
-#undef SKIP_WHITESPACE
-#undef SKIP_USELESS_CHAR
+
 #undef MATCH3
-#undef MATCH4
-#undef MATCH5
-#undef MATCH6
 
-bool TomlParser::LooksLikeDateTime(const std::string_view& data, size_t position) {
-    size_t remaining = data.size() - position;
-    if (remaining < 10) {
-        return false;
+bool LooksLikeDateTime(const std::string_view& sv, size_t position) noexcept {
+    // 检查 "YYYY-" 模式
+    if (position + 5 <= sv.length()) {
+        if (IS_DIGIT(sv[position]) && IS_DIGIT(sv[position + 1]) && IS_DIGIT(sv[position + 2]) &&
+            IS_DIGIT(sv[position + 3]) && sv[position + 4] == '-') {
+            return true;
+        }
     }
 
-    // 日期必须以4位年开头，例：1979-05-27
-    if (!std::isdigit(data[position]) || !std::isdigit(data[position + 1]) ||
-        !std::isdigit(data[position + 2]) || !std::isdigit(data[position + 3])) {
-        return false;
+    // 检查 "hh:" 模式
+    if (position + 3 <= sv.length()) {
+        if (IS_DIGIT(sv[position]) && IS_DIGIT(sv[position + 1]) && sv[position + 2] == ':') {
+            return true;
+        }
     }
-    if (data[position + 4] != '-') {
-        return false;
-    }
-    if (!std::isdigit(data[position + 5]) || !std::isdigit(data[position + 6])) {
-        return false;
-    }
-    if (data[position + 7] != '-') {
-        return false;
-    }
-    if (!std::isdigit(data[position + 8]) || !std::isdigit(data[position + 9])) {
-        return false;
-    }
-    return true;
+
+    return false;
 }
 
-bool TomlParser::MatchFullDateTime(const std::string_view& data) {
-    static const std::regex dateTimePattern(
-        R"(^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)?$)");
-    return std::regex_match(std::string(data), dateTimePattern);
+bool MatchFullDateTime(const std::string_view& data) noexcept {
+    if (data.empty()) {
+        return false;
+    }
+
+    size_t       pos = 0;
+    const size_t len = data.length();
+
+    // -----------------------------------------------------------------
+    // 分支 1: 尝试解析以日期 (YYYY-MM-DD) 开头的格式
+    // -----------------------------------------------------------------
+    if (len >= 10 && (data[0] >= '0' && data[0] <= '9') && (data[1] >= '0' && data[1] <= '9') &&
+        (data[2] >= '0' && data[2] <= '9') && (data[3] >= '0' && data[3] <= '9') &&
+        (data[4] == '-') && (data[5] >= '0' && data[5] <= '9') &&
+        (data[6] >= '0' && data[6] <= '9') && (data[7] == '-') &&
+        (data[8] >= '0' && data[8] <= '9') && (data[9] >= '0' && data[9] <= '9')) {
+        // 检查月份和日期的数值范围
+        const int month = (data[5] - '0') * 10 + (data[6] - '0');
+        const int day   = (data[8] - '0') * 10 + (data[9] - '0');
+
+        if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+            // ---- 日期部分有效 ----
+            pos = 10;
+
+            // 如果字符串到此结束, 则是合法的 Local Date
+            if (pos == len) {
+                return true;
+            }
+
+            // 如果后面有内容, 分隔符必须是 'T', 't', 或空格
+            if (data[pos] != 'T' && data[pos] != 't' && data[pos] != ' ') {
+                return false;
+            }
+            pos++;  // 消耗分隔符
+
+            // ---- 解析时间部分 (hh:mm:ss) ----
+            if (pos + 8 > len)
+                return false;
+            const int hour   = (data[pos] - '0') * 10 + (data[pos + 1] - '0');
+            const int minute = (data[pos + 3] - '0') * 10 + (data[pos + 4] - '0');
+            const int second = (data[pos + 6] - '0') * 10 + (data[pos + 7] - '0');
+
+            if (!((data[pos] >= '0' && data[pos] <= '9') &&
+                  (data[pos + 1] >= '0' && data[pos + 1] <= '9') && (data[pos + 2] == ':') &&
+                  (data[pos + 3] >= '0' && data[pos + 3] <= '9') &&
+                  (data[pos + 4] >= '0' && data[pos + 4] <= '9') && (data[pos + 5] == ':') &&
+                  (data[pos + 6] >= '0' && data[pos + 6] <= '9') &&
+                  (data[pos + 7] >= '0' && data[pos + 7] <= '9') &&
+                  (hour <= 23 && minute <= 59 && second <= 59))) {
+                return false;
+            }
+            pos += 8;
+
+            // ---- 解析可选的亚秒部分 (.ffffff) ----
+            if (pos < len && data[pos] == '.') {
+                pos++;
+                const size_t frac_start = pos;
+                while (pos < len && (data[pos] >= '0' && data[pos] <= '9')) {
+                    pos++;
+                }
+                if (pos == frac_start)
+                    return false;
+            }
+
+            // ---- 解析可选的时区偏移部分 ----
+            if (pos < len) {
+                const char offset_char = data[pos];
+                if (offset_char == 'Z' || offset_char == 'z') {
+                    pos++;
+                } else if (offset_char == '+' || offset_char == '-') {
+                    pos++;
+                    if (pos + 5 > len)
+                        return false;
+                    const int off_hour = (data[pos] - '0') * 10 + (data[pos + 1] - '0');
+                    const int off_min  = (data[pos + 3] - '0') * 10 + (data[pos + 4] - '0');
+
+                    if (!((data[pos] >= '0' && data[pos] <= '9') &&
+                          (data[pos + 1] >= '0' && data[pos + 1] <= '9') &&
+                          (data[pos + 2] == ':') &&
+                          (data[pos + 3] >= '0' && data[pos + 3] <= '9') &&
+                          (data[pos + 4] >= '0' && data[pos + 4] <= '9') &&
+                          (off_hour <= 23 && off_min <= 59))) {
+                        return false;
+                    }
+                    pos += 5;
+                }
+            }
+
+            // 最终检查: 必须消耗掉整个字符串
+            return pos == len;
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // 分支 2: 尝试解析纯时间格式 (hh:mm:ss)
+    // -----------------------------------------------------------------
+    pos = 0;
+    if (len >= 8 && (data[pos + 2] == ':') && (data[pos + 5] == ':') &&
+        (data[pos] >= '0' && data[pos] <= '9') && (data[pos + 1] >= '0' && data[pos + 1] <= '9') &&
+        (data[pos + 3] >= '0' && data[pos + 3] <= '9') &&
+        (data[pos + 4] >= '0' && data[pos + 4] <= '9') &&
+        (data[pos + 6] >= '0' && data[pos + 6] <= '9') &&
+        (data[pos + 7] >= '0' && data[pos + 7] <= '9')) {
+        const int hour   = (data[pos] - '0') * 10 + (data[pos + 1] - '0');
+        const int minute = (data[pos + 3] - '0') * 10 + (data[pos + 4] - '0');
+        const int second = (data[pos + 6] - '0') * 10 + (data[pos + 7] - '0');
+
+        if (hour <= 23 && minute <= 59 && second <= 59) {
+            pos += 8;
+
+            if (pos < len && data[pos] == '.') {
+                pos++;
+                const size_t frac_start = pos;
+                while (pos < len && (data[pos] >= '0' && data[pos] <= '9')) {
+                    pos++;
+                }
+                if (pos == frac_start)
+                    return false;
+            }
+
+            return pos == len;
+        }
+    }
+
+    return false;
 }
 
-std::string TomlParser::Stringify(const TomlValue& value) {
-    std::ostringstream oss;
-    StringifyObject(value, oss);
-    return oss.str();
-}
+namespace parser {
+    TomlValue Parse(std::string_view data) {
+        size_t    position = 0;
+        TomlValue root;
+        // 按行解析
+        size_t size = data.size();
+        // 1. 先解析顶层内容
+        SKIP_USELESS_CHAR(data, position);
+        if (position < size && data[position] != '[') {
+            // 解析顶层属性(key-value)
+            std::vector<std::pair<std::vector<std::string>, TomlValue>> keyValues;
+            while (position < data.size()) {
+                // 如果遇到新的table或者已经没有内容了
+                if (data[position] == '[') {
+                    break;
+                }
+                // 解析key-value
+                keyValues.emplace_back(ParseKeyValue(data, position));
+                // 此时已经来到了新一行,跳过空白、换行、注释等内容
+                SKIP_USELESS_CHAR(data, position);
+            }
+            // 根据表头添加数据
+            // 对于当前节点赋值
+            for (const auto& [k, v] : keyValues) {
+                TomlValue* node = &root;
+                for (size_t i = 0; !k.empty() && i < k.size() - 1; i++) {
+                    if (node->isObject()) {
+                        node = &(*node)[k[i]];
+                    } else {
+                        throw TomlException("node is not a object");
+                    }
+                }
+                if (node->isObject()) {
+                    node->set(k.back(), v);
+                } else {
+                    throw TomlParseException("not a object", position);
+                }
+            }
+        }
+        // 2. 解析[]中的内容
+        while (position < size) {
+            // 跳过无用字符串
+            std::vector<std::string> headers;
+            bool                     isArray = false;
+            SKIP_WHITESPACE_AND_COMMENT(data, position);
+            if (position < size && data[position] == '[') {
+                if (position + 1 < size && data[position + 1] == '[') {
+                    // 数组类型
+                    isArray = true;
+                }
+                // 解析表头
+                headers = ParseTableHeader(data, position, isArray);
+            } else if (position >= size) {
+                break;
+            }
+            // 解析下面的key-value
+            std::vector<std::pair<std::vector<std::string>, TomlValue>> keyValues;
+            while (position < data.size()) {
+                SKIP_USELESS_CHAR(data, position);
+                // 如果遇到新的table或者已经没有内容了
+                if (position >= data.size() || data[position] == '[') {
+                    break;
+                }
+                // 解析key-value
+                keyValues.emplace_back(ParseKeyValue(data, position));
+            }
+            // key-values解析完毕, 根据表头添加数据
+            TomlValue* node = &root;
+            for (size_t i = 0; !headers.empty() && i < headers.size() - 1; i++) {
+                if (node->isObject()) {
+                    node = &(*node)[headers[i]];
+                } else if (node->isArray()) {
+                    auto& array = node->asArray();
+                    // 获取node的一个back
+                    if (array.empty()) {
+                        // 创建一个object推入node中
+                        TomlObject object;
+                        object[headers[i]];
+                        array.emplace_back(object);
+                    } else {
+                        bool ok = false;
+                        // 反向遍历
+                        for (auto it = array.rbegin(); it != array.rend(); ++it) {
+                            if (it->isObject()) {
+                                ok = true;
+                                if (it->asObject().find(headers[i]) == it->asObject().end()) {
+                                    if (isArray) {
+                                        it->set(headers[i], TomlArray());
+                                    } else {
+                                        it->set(headers[i], TomlValue());
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        if (!ok) {
+                            TomlObject object;
+                            object[headers[i]];
+                            array.emplace_back(object);
+                        }
+                    }
+                    node = &(node->asArray().back()[headers[i]]);
+                }
+            }
+            // 是array
+            if (isArray) {
+                if (node->isObject() &&
+                    node->asObject().find(headers.back()) == node->asObject().end()) {
+                    node->set(headers.back(), TomlArray());
+                }
+            }
+            // 如果不存在则会创建一个object
+            if (node->isObject()) {
+                node = &(*node)[headers.back()];
+            } else if (node->isArray()) {
+                // 获取node的一个back
+                auto& array = node->asArray();
+                if (array.empty()) {
+                    // 创建一个object推入node中
+                    TomlObject object;
+                    object[headers.back()];
+                    array.emplace_back(object);
+                } else {
+                    // 数组不为空
+                    bool ok = false;
+                    for (auto it = array.rbegin(); it != array.rend(); ++it) {
+                        if (it->isObject()) {
+                            ok = true;
+                            if (it->asObject().find(headers.back()) == it->asObject().end()) {
+                                if (isArray) {
+                                    it->set(headers.back(), TomlArray());
+                                } else {
+                                    it->set(headers.back(), TomlValue());
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    if (!ok) {
+                        TomlObject object;
+                        object[headers.back()];
+                        array.emplace_back(object);
+                    }
+                }
+                node = &(node->asArray().back()[headers.back()]);
+            }
+            if (node->isArray() != isArray) {
+                throw TomlParseException("node is not a array", position);
+            }
+            // 对于当前节点赋值
+            if (node->isArray()) {
+                // node是一个数组
+                if (keyValues.empty()) {
+                    node->push_back(TomlValue());
+                } else {
+                    // 新的数组对象
+                    TomlValue parent;
+                    for (const auto& [ks, v] : keyValues) {
+                        TomlValue* tempNode = &parent;
+                        for (size_t i = 0; !ks.empty() && i < ks.size() - 1; i++) {
+                            tempNode = &(*tempNode)[ks[i]];
+                        }
+                        tempNode->set(ks.back(), v);
+                    }
+                    node->push_back(parent);
+                }
+            } else {
+                // 对象
+                for (const auto& [ks, v] : keyValues) {
+                    auto tempNode = node;
+                    for (size_t i = 0; !ks.empty() && i < ks.size() - 1; i++) {
+                        tempNode = &(*tempNode)[ks[i]];
+                    }
+                    tempNode->set(ks.back(), v);
+                }
+            }
+        }
+        // 跳过无用字符串
+        SKIP_WHITESPACE_AND_COMMENT(data, position);
+        if (position != data.size()) {
+            throw TomlParseException("Unexpected content after Toml value", position);
+        }
+        return root;
+    }
+}  // namespace parser
 
-void TomlParser::StringifyArray(const TomlValue& value, std::ostringstream& oss) {
+#undef SKIP_USELESS_CHAR
+#undef SKIP_CRLF
+#undef SKIP_WHITESPACE_AND_COMMENT
+#undef SKIP_WHITESPACE
+
+static void        StringifyArray(const TomlValue& value, std::ostringstream& oss);
+static void        StringifyInlineObject(const TomlObject& obj, std::ostringstream& oss);
+static bool        IsArrayOfTables(const TomlValue& value);
+inline static void StringifyObject(const TomlValue& value, std::ostringstream& oss);
+static void
+StringifyObject(const TomlObject& object, std::ostringstream& oss, const std::string& prefix);
+static void        StringifyValue(const TomlValue& value, std::ostringstream& oss);
+inline static void StringifyBoolean(const TomlValue& value, std::ostringstream& oss);
+inline static void StringifyInteger(const TomlValue& value, std::ostringstream& oss);
+static void        StringifyDouble(const TomlValue& value, std::ostringstream& oss);
+static bool        StringIsBareKey(const std::string& s);
+inline static void StringifyString(const TomlValue& value, std::ostringstream& oss);
+static void        StringifyString(const std::string& s, std::ostringstream& oss);
+inline static void StringifyDate(const TomlValue& value, std::ostringstream& oss);
+
+void StringifyArray(const TomlValue& value, std::ostringstream& oss) {
     const auto& array = value.get<TomlArray>();
     oss << "[";
     for (size_t i = 0; i < array.size(); ++i) {
@@ -1215,7 +1542,7 @@ void TomlParser::StringifyArray(const TomlValue& value, std::ostringstream& oss)
     oss << "]";
 }
 
-void TomlParser::StringifyInlineObject(const TomlObject& obj, std::ostringstream& oss) {
+void StringifyInlineObject(const TomlObject& obj, std::ostringstream& oss) {
     oss << "{ ";
     bool first = true;
     for (const auto& [key, val] : obj) {
@@ -1230,11 +1557,11 @@ void TomlParser::StringifyInlineObject(const TomlObject& obj, std::ostringstream
     oss << " }";
 }
 
-bool TomlParser::IsArrayOfTables(const TomlValue& value) {
+bool IsArrayOfTables(const TomlValue& value) {
     if (value.type() != TomlType::Array) {
         return false;
     }
-    const auto& array = value.get<TomlArray>();
+    const auto& array = value.asArray();
     if (array.empty()) {
         return false;
     }
@@ -1242,23 +1569,21 @@ bool TomlParser::IsArrayOfTables(const TomlValue& value) {
                        [](const TomlValue& item) { return item.type() == TomlType::Object; });
 }
 
-void TomlParser::StringifyObject(const TomlValue& value, std::ostringstream& oss) {
-    if (!value.isObject()) {
-        throw TomlException("Top-level value must be object");
-    }
+inline void StringifyObject(const TomlValue& value, std::ostringstream& oss) {
     StringifyObject(value.asObject(), oss, "");
 }
 
-void TomlParser::StringifyObject(const TomlObject&   object,
-                                 std::ostringstream& oss,
-                                 const std::string&  prefix) {
+void StringifyObject(const TomlObject& object, std::ostringstream& oss, const std::string& prefix) {
     // 🔹 1. 输出非 Object 的字段（顶层属性）
     for (const auto& [key, val] : object) {
         if (val.type() != TomlType::Object && !IsArrayOfTables(val)) {
             if (StringIsBareKey(key)) {
-                oss << key << " = ";
+                StringifyString(key, oss);
+                oss << " = ";
             } else {
-                oss << '"' << key << "\" = ";
+                oss << '"';
+                StringifyString(key, oss);
+                oss << "\" = ";
             }
             StringifyValue(val, oss);
             oss << "\n";
@@ -1293,80 +1618,99 @@ void TomlParser::StringifyObject(const TomlObject&   object,
     }
 }
 
-void TomlParser::StringifyValue(const TomlValue& value, std::ostringstream& oss) {
-#define STRINGIFY(type)                                                                            \
-    case TomlType::type: return Stringify##type(value, oss)
+void StringifyValue(const TomlValue& value, std::ostringstream& oss) {
     switch (value.type()) {
-        STRINGIFY(Boolean);
-        STRINGIFY(Integer);
-        STRINGIFY(Double);
-        STRINGIFY(String);
-        STRINGIFY(Date);
-        STRINGIFY(Array);
-        STRINGIFY(Object);
+        case TomlType::Boolean: return StringifyBoolean(value, oss);
+        case TomlType::Integer: return StringifyInteger(value, oss);
+        case TomlType::Double: return StringifyDouble(value, oss);
+        case TomlType::String: return StringifyString(value, oss);
+        case TomlType::Date: return StringifyDate(value, oss);
+        case TomlType::Array: return StringifyArray(value, oss);
+        case TomlType::Object: return StringifyObject(value, oss);
     }
-#undef STRINGIFY
 }
 
-void TomlParser::StringifyBoolean(const TomlValue& value, std::ostringstream& oss) {
+inline void StringifyBoolean(const TomlValue& value, std::ostringstream& oss) {
     oss << (value.get<bool>() ? "true" : "false");
 }
 
-void TomlParser::StringifyInteger(const TomlValue& value, std::ostringstream& oss) {
+inline void StringifyInteger(const TomlValue& value, std::ostringstream& oss) {
     oss << value.get<int64_t>();
 }
 
-void TomlParser::StringifyDouble(const TomlValue& value, std::ostringstream& oss) {
+void StringifyDouble(const TomlValue& value, std::ostringstream& oss) {
     auto num = value.get<double>();
     if (std::isinf(num)) {
-        oss << "inf";
+        if (std::signbit(num)) {
+            oss << "-inf";
+        } else {
+            oss << "inf";
+        }
     } else if (std::isnan(num)) {
         oss << "nan";
     } else {
-        oss << std::to_string(num);
+        oss << std::setprecision(std::numeric_limits<double>::max_digits10) << num;
     }
 }
 
-bool TomlParser::StringIsBareKey(const std::string& s) {
-    // 空字符串不是合法的barekey
+bool StringIsBareKey(const std::string& s) {
+    // 空字符串不是合法的bareKey
     if (s.empty()) {
         return false;
     }
-
     // 第一个字符不能是数字
-    if (std::isdigit(static_cast<unsigned char>(s.front()))) {
+    if (IS_DIGIT(s.front())) {
         return false;
     }
-
     // 使用std::all_of检查剩余字符是否符合要求
     return std::all_of(s.begin() + 1, s.end(),
-                       [](unsigned char c) { return std::isalnum(c) || c == '_' || c == '-'; });
+                       [](char c) { return std::isalnum(c) || c == '_' || c == '-'; });
 }
 
-void TomlParser::StringifyString(const TomlValue& value, std::ostringstream& oss) {
+inline void StringifyString(const TomlValue& value, std::ostringstream& oss) {
     StringifyString(value.get<std::string>(), oss);
 }
 
-void TomlParser::StringifyString(const std::string& s, std::ostringstream& oss) {
+void StringifyString(const std::string& s, std::ostringstream& oss) {
     oss << '"';
     for (char c : s) {
+        auto uc = static_cast<unsigned char>(c);  // 处理负值字符
+        // 特殊处理已定义的转义字符
         switch (c) {
-            case '"': oss << "\\\""; break;
-            case '\\': oss << "\\\\"; break;
-            case '\b': oss << "\\b"; break;
-            case '\f': oss << "\\f"; break;
-            case '\n': oss << "\\n"; break;
-            case '\r': oss << "\\r"; break;
-            case '\t': oss << "\\t"; break;
-            default: oss << c; break;
+            case '"': oss << "\\\""; continue;
+            case '\\': oss << "\\\\"; continue;
+            case '\b': oss << "\\b"; continue;
+            case '\f': oss << "\\f"; continue;
+            case '\n': oss << "\\n"; continue;
+            case '\r': oss << "\\r"; continue;
+            case '\t': oss << "\\t"; continue;
+            default: break;
         }
+
+        // 处理其他控制字符（U+0000至U+0008、U+000A至U+001F、U+007F）
+        if ((uc <= 0x08) || (uc >= 0x0A && uc <= 0x1F) || uc == 0x7F) {
+            oss << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<int>(uc);
+            continue;
+        }
+
+        // 非控制字符直接输出
+        oss << c;
     }
     oss << '"';
 }
 
-void TomlParser::StringifyDate(const TomlValue& value, std::ostringstream& oss) {
+inline void StringifyDate(const TomlValue& value, std::ostringstream& oss) {
     oss << value.asDate();
 }
 
+namespace parser {
+    std::string Stringify(const TomlValue& value) {
+        std::ostringstream oss;
+        StringifyValue(value, oss);
+        return oss.str();
+    }
+}  // namespace parser
+
+#undef IS_DIGIT
 }  // namespace cctoml
 #pragma clang diagnostic pop
