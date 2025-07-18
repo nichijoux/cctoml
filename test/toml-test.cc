@@ -202,7 +202,7 @@ int main() {
     }
     std::string tomlStr = buffer.str();
     try {
-        TomlValue toml = parser::Parse(tomlStr);
+        TomlValue toml = parser::parse(tomlStr);
         std::cout << TomlStringifyer::stringify(toml, 4) << std::endl;
         return 0;
     } catch (const std::runtime_error& e) {

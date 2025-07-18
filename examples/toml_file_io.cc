@@ -192,77 +192,9 @@ class TomlStringifyer {
     }
 };
 
-// 输出 TOML 格式的浮点数
-std::string format_toml_float(double value) {
-    // 处理特殊值
-    if (std::isnan(value))
-        return "nan";
-    if (std::isinf(value))
-        return value > 0 ? "inf" : "-inf";
-    if (value == 0.0)
-        return "0.0";  // 处理正零和负零
-
-    // 检测是否为整数（如 3.0 → 3）
-    if (value == std::trunc(value) && std::abs(value) < 1e18) {
-        return std::to_string(static_cast<int64_t>(value));
-    }
-
-    // 尝试不同精度，寻找最短精确表示
-    for (int precision = 15; precision <= 17; ++precision) {
-        std::stringstream ss;
-        ss << std::fixed << std::setprecision(precision) << value;
-        std::string str = ss.str();
-
-        // 移除末尾的零
-        size_t dot_pos = str.find('.');
-        if (dot_pos != std::string::npos) {
-            size_t last_non_zero = str.find_last_not_of('0');
-            if (last_non_zero != std::string::npos && last_non_zero > dot_pos) {
-                str = str.substr(0, last_non_zero + 1);
-            }
-        }
-
-        // 转回double验证精度
-        double converted;
-        ss.str("");
-        ss.clear();
-        ss << str;
-        ss >> converted;
-
-        if (converted == value) {
-            return str;
-        }
-    }
-
-    // 如果所有精度都不匹配，使用max_digits10
-    std::stringstream ss;
-    ss << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
-    return ss.str();
-}
-
-void testDouble() {
-    double values[] = {
-        3.141592653589793,                         // 精确值
-        -3.141592653589793,                        // 负精确值
-        0.1,                                       // 无法精确表示的值
-        1e20,                                      // 大数值
-        1e-20,                                     // 小数值
-        3.0,                                       // 整数
-        0.0,                                       // 零
-        std::numeric_limits<double>::infinity(),   // 无穷大
-        -std::numeric_limits<double>::infinity(),  // 负无穷大
-        std::numeric_limits<double>::quiet_NaN()   // NaN
-    };
-
-    for (double value : values) {
-        std::cout << "原始值: " << std::setprecision(20) << value
-                  << "\t→ TOML格式: " << format_toml_float(value) << std::endl;
-    }
-}
-
 int main() {
     // 读取toml文件
-    std::ifstream input_file("config.toml");
+    std::ifstream input_file("config.toml", std::ios::binary);
     if (!input_file.is_open()) {
         std::cerr << "Error: Could not open twitter.Toml" << std::endl;
         return 1;
@@ -272,11 +204,10 @@ int main() {
     std::string Toml_str((std::istreambuf_iterator<char>(input_file)),
                          std::istreambuf_iterator<char>());
     input_file.close();
-
     // 解析toml
     TomlValue toml;
     try {
-        toml = parser::Parse(Toml_str);
+        toml = parser::parse(Toml_str);
         std::cout << "Successfully parsed config.toml" << std::endl;
 
         // 打印Toml内容
@@ -286,8 +217,8 @@ int main() {
         std::cout << "----------------------------------------" << std::endl;
 
         std::cout << toml << std::endl;
-    } catch (const TomlException& e) {
-        std::cerr << "Parse error: " << e.what() << std::endl;
+    } catch (const std::runtime_error& e) {
+        std::cerr << "parse error: " << e.what() << std::endl;
         return 1;
     }
     return 0;

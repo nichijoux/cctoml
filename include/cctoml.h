@@ -31,9 +31,9 @@ enum class TomlType { Boolean, Integer, Double, String, Date, Array, Object };
 class TomlValue;
 
 namespace parser {
-    TomlValue Parse(std::string_view data);
+    TomlValue parse(std::string_view data);
 
-    std::string Stringify(const TomlValue& value);
+    std::string stringify(const TomlValue& value);
 }  // namespace parser
 
 using TomlString = std::string;
@@ -53,8 +53,20 @@ class TomlDate {
   public:
     // 从符合 TOML 规范的字符串构造对象
     TomlDate(std::string_view s) : m_type(TomlDateTimeType::INVALID) {
-        parse(std::string(s));
+        parse(s);
     }
+
+    /**
+     * @brief 拷贝构造函数
+     * @param date toml日期
+     */
+    TomlDate(const TomlDate& date) noexcept;
+
+    TomlDate(TomlDate&& date) noexcept;
+
+    TomlDate& operator=(const TomlDate& date) noexcept;
+
+    TomlDate& operator=(TomlDate&& date) noexcept;
 
     inline TomlDateTimeType type() const {
         return m_type;
@@ -76,37 +88,72 @@ class TomlDate {
         return m_type == TomlDateTimeType::LOCAL_TIME;
     }
 
-    // 获取日期时间的各个部分
+    // 获取年份（仅对包含日期的类型有效）
     inline std::optional<int> getYear() const {
-        return m_year;
+        // 只有包含日期的类型（LOCAL_DATE/LOCAL_DATE_TIME/OFFSET_DATE_TIME）有年
+        if (m_type == TomlDateTimeType::LOCAL_DATE || m_type == TomlDateTimeType::LOCAL_DATE_TIME ||
+            m_type == TomlDateTimeType::OFFSET_DATE_TIME) {
+            return static_cast<int>(getSignedBits(m_core, 48, 16));
+        }
+        return std::nullopt;
     }
 
+    // 获取月份（仅对包含日期的类型有效）
     inline std::optional<int> getMonth() const {
-        return m_month;
+        if (m_type == TomlDateTimeType::LOCAL_DATE || m_type == TomlDateTimeType::LOCAL_DATE_TIME ||
+            m_type == TomlDateTimeType::OFFSET_DATE_TIME) {
+            return static_cast<int>(getBits(m_core, 44, 4));
+        }
+        return std::nullopt;
     }
 
     inline std::optional<int> getDay() const {
-        return m_day;
+        if (m_type == TomlDateTimeType::LOCAL_DATE || m_type == TomlDateTimeType::LOCAL_DATE_TIME ||
+            m_type == TomlDateTimeType::OFFSET_DATE_TIME) {
+            return static_cast<int>(getBits(m_core, 39, 5));
+        }
+        return std::nullopt;
     }
 
     inline std::optional<int> getHour() const {
-        return m_hour;
+        if (m_type == TomlDateTimeType::LOCAL_TIME || m_type == TomlDateTimeType::LOCAL_DATE_TIME ||
+            m_type == TomlDateTimeType::OFFSET_DATE_TIME) {
+            return static_cast<int>(getBits(m_core, 34, 5));
+        }
+        return std::nullopt;
     }
 
     inline std::optional<int> getMinute() const {
-        return m_minute;
+        if (m_type == TomlDateTimeType::LOCAL_TIME || m_type == TomlDateTimeType::LOCAL_DATE_TIME ||
+            m_type == TomlDateTimeType::OFFSET_DATE_TIME) {
+            return static_cast<int>(getBits(m_core, 28, 6));
+        }
+        return std::nullopt;
     }
 
     inline std::optional<int> getSecond() const {
-        return m_second;
+        if (m_type == TomlDateTimeType::LOCAL_TIME || m_type == TomlDateTimeType::LOCAL_DATE_TIME ||
+            m_type == TomlDateTimeType::OFFSET_DATE_TIME) {
+            return static_cast<int>(getBits(m_core, 22, 6));
+        }
+        return std::nullopt;
     }
 
-    inline std::optional<std::chrono::nanoseconds> getSubSecond() const {
-        return m_subSecond;
+    inline std::optional<int> getSubSecond() const {
+        if (m_subSecond != -1 &&  // 有亚秒
+            (m_type == TomlDateTimeType::LOCAL_TIME ||
+             m_type == TomlDateTimeType::LOCAL_DATE_TIME ||
+             m_type == TomlDateTimeType::OFFSET_DATE_TIME)) {
+            return static_cast<int>(m_subSecond & 0x3FFFFFFF);  // 取低30位
+        }
+        return std::nullopt;
     }
 
-    inline std::optional<std::chrono::minutes> getOffset() const {
-        return m_tzOffset;
+    inline std::optional<int> getTzOffset() const {
+        if (m_type == TomlDateTimeType::OFFSET_DATE_TIME) {
+            return static_cast<int>(getSignedBits(m_core, 11, 11));
+        }
+        return std::nullopt;
     }
 
     void reset();
@@ -121,10 +168,7 @@ class TomlDate {
 
     // 比较操作符
     inline bool operator==(const TomlDate& other) const {
-        return m_type == other.m_type && m_year == other.m_year && m_month == other.m_month &&
-               m_day == other.m_day && m_hour == other.m_hour && m_minute == other.m_minute &&
-               m_second == other.m_second && m_subSecond == other.m_subSecond &&
-               m_tzOffset == other.m_tzOffset;
+        return m_type == other.m_type && m_core == other.m_core && m_subSecond == other.m_subSecond;
     }
 
     inline bool operator!=(const TomlDate& other) const {
@@ -137,9 +181,72 @@ class TomlDate {
     }
 
   private:
-    static std::optional<int> parseDigits(const std::string_view& sv, size_t& position, int count);
+    static std::optional<int> ParseDigits(const std::string_view& sv, size_t& position, int count);
 
-  private:
+    // 存储值到指定位范围
+    static void setBits(int64_t& target, int64_t value, int startBit, int bitCount) {
+        int64_t mask = (1LL << bitCount) - 1;  // 生成bitCount位的掩码
+        value &= mask;                         // 截断值到bitCount位
+        target &= ~(mask << startBit);         // 清除目标位置的旧值
+        target |= (value << startBit);         // 写入新值
+    }
+
+    // 从指定位范围提取值
+    static int64_t getBits(int64_t source, int startBit, int bitCount) {
+        int64_t mask = (1LL << bitCount) - 1;
+        return (source >> startBit) & mask;
+    }
+
+    // 有符号值提取（如时区偏移、年）
+    static int64_t getSignedBits(int64_t source, int startBit, int bitCount) {
+        int64_t raw     = getBits(source, startBit, bitCount);
+        int64_t signBit = 1LL << (bitCount - 1);  // 符号位位置
+        if (raw & signBit) {                      // 负数（补码）
+            return raw - (1LL << bitCount);       // 转换为有符号值
+        }
+        return raw;  // 正数
+    }
+
+    // 示例：解析年份后存储
+    inline void setYear(int year) {
+        // 年：16位，startBit=48，bitCount=16
+        setBits(m_core, year, 48, 16);
+    }
+
+    // 示例：解析月份后存储
+    inline void setMonth(int month) {
+        // 月：4位，startBit=44，bitCount=4
+        setBits(m_core, month, 44, 4);
+    }
+
+    inline void setDay(int day) {
+        setBits(m_core, day, 39, 5);
+    }
+
+    inline void setHour(int hour) {
+        setBits(m_core, hour, 34, 5);
+    }
+
+    inline void setMinute(int minute) {
+        setBits(m_core, minute, 28, 6);
+    }
+
+    inline void setSecond(int second) {
+        // 使用setBits设置秒（bit22~bit27）
+        setBits(m_core, second, 22, 6);
+    }
+
+    // 示例：解析时区偏移（分钟）后存储
+    inline void setTzOffset(int tzOffset) {
+        // 时区偏移：11位，startBit=11，bitCount=11
+        setBits(m_core, tzOffset, 11, 11);
+    }
+
+    // 示例：解析亚秒后存储
+    inline void setSubSecond(int64_t subSecond) {
+        m_subSecond = subSecond;  // 直接存储（仅用低30位）
+    }
+
     bool parseTimePart(const std::string_view& sv, size_t& position);
 
     void parseSubSecond(const std::string_view& sv, size_t& position);
@@ -148,21 +255,15 @@ class TomlDate {
 
     bool parseLocalTime(const std::string_view& sv);
 
-    bool parseDateTimeWithDate(const std::string_view& sv);
+    bool parseDateTime(const std::string_view& sv);
 
-    void parse(const std::string& s);
+    void parse(const std::string_view& s);
 
   private:
     // 详细的日期类型
     TomlDateTimeType m_type;
-    // 年、月、日
-    std::optional<int> m_year, m_month, m_day;
-    // 时、分、秒
-    std::optional<int> m_hour, m_minute, m_second;
-    // subsecond
-    std::optional<std::chrono::nanoseconds> m_subSecond;
-    // 时区偏移
-    std::optional<std::chrono::minutes> m_tzOffset;
+    int64_t          m_core{0};       ///< 存储年月日时分秒+时区偏移
+    int64_t          m_subSecond{0};  ///< 存储亚秒（纳秒），-1表示无亚秒
 };
 
 /**
@@ -660,7 +761,7 @@ class TomlValue {
      * @return Toml 值的字符串表示。
      */
     inline std::string toString() const {
-        return parser::Stringify(*this);
+        return parser::stringify(*this);
     }
 
     /**
@@ -765,7 +866,7 @@ TomlValue toToml(const Map& map) {
  * @note 解析调用TomlParser::parse且不支持任何扩展
  */
 inline TomlValue operator""_Toml(const char* data, size_t length) {
-    return parser::Parse({data, length});
+    return parser::parse({data, length});
 }
 }  // namespace cctoml
 
