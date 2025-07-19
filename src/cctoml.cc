@@ -591,6 +591,8 @@ TomlValue& TomlValue::push_back(const TomlValue& value) {
         }                                                                                          \
     } while (false)
 
+static std::vector<std::pair<std::vector<std::string>, TomlValue>>
+                 parseKeyValuePairs(std::string_view data, size_t& position);
 static TomlValue parseBoolean(const std::string_view& data, size_t& position);
 static std::vector<std::string>
 parseTableHeader(const std::string_view& data, size_t& position, bool isArray);
@@ -633,6 +635,23 @@ static bool LooksLikeDateTime(const std::string_view& sv, size_t position) noexc
  * @return 如果完全匹配，则为 true，否则为 false。
  */
 static bool MatchFullDateTime(const std::string_view& data) noexcept;
+
+static std::vector<std::pair<std::vector<std::string>, TomlValue>>
+parseKeyValuePairs(std::string_view data, size_t& position) {
+    std::vector<std::pair<std::vector<std::string>, TomlValue>> keyValues;
+
+    while (position < data.size()) {
+        SKIP_USELESS_CHAR(data, position);
+        // 遇到新的table或者没有内容
+        if (position >= data.size() || data[position] == '[') {
+            break;
+        }
+        // 解析key-value
+        keyValues.emplace_back(parseKeyValue(data, position));
+    }
+
+    return keyValues;
+}
 
 TomlValue parseBoolean(const std::string_view& data, size_t& position) {
     // 当前字符一定为t或f
@@ -1492,20 +1511,9 @@ namespace parser {
         // 按行解析
         size_t size = data.size();
         // 1. 先解析顶层内容
-        SKIP_USELESS_CHAR(data, position);
         if (position < size && data[position] != '[') {
             // 解析顶层属性(key-value)
-            std::vector<std::pair<std::vector<std::string>, TomlValue>> keyValues;
-            while (position < data.size()) {
-                // 如果遇到新的table或者已经没有内容了
-                if (data[position] == '[') {
-                    break;
-                }
-                // 解析key-value
-                keyValues.emplace_back(parseKeyValue(data, position));
-                // 此时已经来到了新一行,跳过空白、换行、注释等内容
-                SKIP_USELESS_CHAR(data, position);
-            }
+            auto keyValues = parseKeyValuePairs(data, position);
             // 根据表头添加数据
             // 对于当前节点赋值
             for (const auto& [k, v] : keyValues) {
@@ -1521,7 +1529,7 @@ namespace parser {
                     if (node->asObject().find(k.back()) == node->asObject().end()) {
                         node->set(k.back(), v);
                     } else {
-                        throw TomlParseException("key " + k.back() + " existed", position);
+                        throw TomlParseException("key '" + k.back() + "' has existed", position);
                     }
                 } else {
                     throw TomlParseException("not a object", position);
@@ -1531,35 +1539,30 @@ namespace parser {
         // 2. 解析[]中的内容
         while (position < size) {
             // 跳过无用字符串
-            std::vector<std::string> headers;
-            bool                     isArray = false;
             SKIP_WHITESPACE_AND_COMMENT(data, position);
-            if (position < size && data[position] == '[') {
-                if (position + 1 < size && data[position + 1] == '[') {
-                    // 数组类型
-                    isArray = true;
-                }
-                // 解析表头（然后期待换行）
-                headers = parseTableHeader(data, position, isArray);
-                SKIP_WHITESPACE_AND_COMMENT(data, position);
-                if (position < size && data[position] != '\r' && data[position] != '\n') {
-                    throw TomlParseException("A line break is required after the value", position);
-                }
-                SKIP_CRLF(data, position);
-            } else if (position >= size) {
+            if (position >= size) {
                 break;
             }
-            // 解析下面的key-value
-            std::vector<std::pair<std::vector<std::string>, TomlValue>> keyValues;
-            while (position < data.size()) {
-                SKIP_USELESS_CHAR(data, position);
-                // 如果遇到新的table或者已经没有内容了
-                if (position >= data.size() || data[position] == '[') {
-                    break;
-                }
-                // 解析key-value
-                keyValues.emplace_back(parseKeyValue(data, position));
+            if (data[position] != '[') {
+                throw TomlParseException("Expected table header", position);
             }
+            // 解析表头
+            bool isArray = false;
+            if (position + 1 < size && data[position + 1] == '[') {
+                isArray = true;
+            }
+            // 解析表头（然后期待换行）
+            auto headers = parseTableHeader(data, position, isArray);
+            // 表头后可能存在空白和注释
+            SKIP_WHITESPACE_AND_COMMENT(data, position);
+            // 表头需要换货
+            if (position < size && data[position] != '\r' && data[position] != '\n') {
+                throw TomlParseException("A line break is required after the value", position);
+            }
+            SKIP_CRLF(data, position);
+
+            // 解析下面的key-value
+            auto keyValues = parseKeyValuePairs(data, position);
             // key-values解析完毕, 根据表头添加数据
             // 查找要添加的表节点
             TomlValue* node = &root;
@@ -1571,40 +1574,31 @@ namespace parser {
                     // 获取node的一个back
                     if (array.empty()) {
                         // 创建一个object推入node中
-                        TomlObject object;
-                        object[headers[i]];
-                        array.emplace_back(object);
+                        array.emplace_back(TomlObject{{headers[i], TomlValue()}});
                     } else {
-                        bool ok = false;
-                        // 反向遍历
-                        for (auto it = array.rbegin(); it != array.rend(); ++it) {
-                            if (it->isObject()) {
-                                ok = true;
-                                if (it->asObject().find(headers[i]) == it->asObject().end()) {
-                                    if (isArray) {
-                                        it->set(headers[i], TomlArray());
-                                    } else {
-                                        it->set(headers[i], TomlValue());
-                                    }
-                                }
-                                break;
+                        if (auto it = std::find_if(
+                                array.rbegin(), array.rend(),
+                                [](const auto& element) { return element.isObject(); });
+                            it != array.rend()) {
+                            // 找到了对象元素
+                            if (it->asObject().find(headers[i]) == it->asObject().end()) {
+                                it->set(headers[i], isArray ? TomlArray() : TomlValue());
                             }
-                        }
-                        if (!ok) {
-                            TomlObject object;
-                            object[headers[i]];
-                            array.emplace_back(object);
+                        } else {
+                            // 没有找到对象元素, 向array中放入一个空的{}
+                            array.emplace_back(TomlObject{{headers[i], TomlValue()}});
                         }
                     }
                     node = &(node->asArray().back()[headers[i]]);
+                } else {
+                    throw TomlParseException("node should be a array or object", position);
                 }
             }
-            // 是array
-            if (isArray) {
-                if (node->isObject() &&
-                    node->asObject().find(headers.back()) == node->asObject().end()) {
-                    node->set(headers.back(), TomlArray());
-                }
+            // 是array,当前node又是一个object
+            // 相当于[[ a.b ]]的 a 为 node, b是headers.back()
+            if (isArray && node->isObject() &&
+                node->asObject().find(headers.back()) == node->asObject().end()) {
+                node->set(headers.back(), TomlArray());
             }
             // 如果不存在则会创建一个object
             if (node->isObject()) {
@@ -1614,29 +1608,20 @@ namespace parser {
                 auto& array = node->asArray();
                 if (array.empty()) {
                     // 创建一个object推入node中
-                    TomlObject object;
-                    object[headers.back()];
-                    array.emplace_back(object);
+                    array.emplace_back(TomlObject{{headers.back(), TomlValue()}});
                 } else {
-                    // 数组不为空
-                    bool ok = false;
-                    for (auto it = array.rbegin(); it != array.rend(); ++it) {
-                        if (it->isObject()) {
-                            ok = true;
-                            if (it->asObject().find(headers.back()) == it->asObject().end()) {
-                                if (isArray) {
-                                    it->set(headers.back(), TomlArray());
-                                } else {
-                                    it->set(headers.back(), TomlValue());
-                                }
-                            }
-                            break;
+                    // 反向遍历是为了找到[该数组里最近定义的表元素]
+                    if (auto it =
+                            std::find_if(array.rbegin(), array.rend(),
+                                         [](const auto& element) { return element.isObject(); });
+                        it != array.rend()) {
+                        // 找到了对象元素
+                        if (it->asObject().find(headers.back()) == it->asObject().end()) {
+                            it->set(headers.back(), isArray ? TomlArray() : TomlValue());
                         }
-                    }
-                    if (!ok) {
-                        TomlObject object;
-                        object[headers.back()];
-                        array.emplace_back(object);
+                    } else {
+                        // 没有找到对象元素, 向array中放入一个空的{}
+                        array.emplace_back(TomlObject{{headers.back(), TomlValue()}});
                     }
                 }
                 node = &(node->asArray().back()[headers.back()]);
