@@ -33,7 +33,10 @@ class TomlValue;
 namespace parser {
     TomlValue parse(std::string_view data);
 
-    std::string stringify(const TomlValue& value);
+    enum StringifyType { TO_TOML, TO_JSON, TO_YAML };
+
+    std::string
+    stringify(const TomlValue& value, StringifyType type = StringifyType::TO_TOML, int indent = 0);
 }  // namespace parser
 
 using TomlString = std::string;
@@ -207,13 +210,11 @@ class TomlDate {
         return raw;  // 正数
     }
 
-    // 示例：解析年份后存储
     inline void setYear(int year) {
         // 年：16位，startBit=48，bitCount=16
         setBits(m_core, year, 48, 16);
     }
 
-    // 示例：解析月份后存储
     inline void setMonth(int month) {
         // 月：4位，startBit=44，bitCount=4
         setBits(m_core, month, 44, 4);
@@ -236,13 +237,11 @@ class TomlDate {
         setBits(m_core, second, 22, 6);
     }
 
-    // 示例：解析时区偏移（分钟）后存储
     inline void setTzOffset(int tzOffset) {
         // 时区偏移：11位，startBit=11，bitCount=11
         setBits(m_core, tzOffset, 11, 11);
     }
 
-    // 示例：解析亚秒后存储
     inline void setSubSecond(int64_t subSecond) {
         m_subSecond = subSecond;  // 直接存储（仅用低30位）
     }
@@ -589,6 +588,7 @@ class TomlValue {
     T get() const {
         using rawT = T;
         if constexpr (std::is_same_v<rawT, TomlValue>) {
+            // 本身
             return *this;
         } else if constexpr (std::is_arithmetic_v<rawT>) {
             // 支持所有数值类型之间的转换
@@ -604,8 +604,10 @@ class TomlValue {
             }
         } else if constexpr (std::is_same_v<rawT, std::string> ||
                              std::is_same_v<rawT, std::string_view>) {
+            // 字符串
             return operator std::string();
         } else if constexpr (std::is_same_v<rawT, TomlDate>) {
+            // 日期
             return asDate();
         } else if constexpr (HasFromToml<rawT>::value) {
             // 处理自定义类型
@@ -760,8 +762,9 @@ class TomlValue {
      * @param indent 缩进空格数（默认 0，表示无缩进）
      * @return Toml 值的字符串表示。
      */
-    inline std::string toString() const {
-        return parser::stringify(*this);
+    inline std::string toString(parser::StringifyType type   = parser::StringifyType::TO_TOML,
+                                int                   indent = 0) const {
+        return parser::stringify(*this, type, indent);
     }
 
     /**

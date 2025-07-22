@@ -83,24 +83,98 @@ class TomlStringifyer {
         }
     }
 
+    static std::string stringifyDouble(double num) {
+        // 处理特殊值
+        if (std::isnan(num)) {
+            return "nan";
+        } else if (std::isinf(num)) {
+            return num > 0 ? "inf" : "-inf";
+        } else {
+            std::ostringstream oss;
+            oss.imbue(std::locale::classic());  // 确保使用点号作为小数点
+
+            // 检查是否为整数值但需要表示为浮点数
+            bool isIntegerValue =
+                (num == std::floor(num)) && (std::abs(num) < 1e14);  // 避免大整数精度问题
+
+            const double absValue = std::abs(num);
+
+            // 决定使用常规表示法还是科学计数法
+            bool useScientific = (absValue >= 1e6) || (absValue > 0 && absValue < 1e-4);
+
+            if (useScientific) {
+                // 科学计数法表示 - 先获取原始科学计数法字符串
+                oss << std::scientific << std::setprecision(15) << num;
+                std::string str = oss.str();
+
+                // 解析科学计数法的各个部分
+                size_t ePos = str.find_first_of("eE");
+                if (ePos == std::string::npos) {
+                    return str;  // 不是科学计数法格式，直接返回
+                }
+
+                // 分解为尾数和指数部分
+                std::string mantissa = str.substr(0, ePos);
+                std::string exponent = str.substr(ePos + 1);
+
+                // 处理尾数部分
+                // 确保小数点存在
+                //            if (mantissa.find('.') == std::string::npos) {
+                //                mantissa += ".0";
+                //            }
+
+                // 移除尾数部分无意义的零
+                size_t lastNonZero = mantissa.find_last_not_of('0');
+                if (lastNonZero != std::string::npos) {
+                    if (mantissa[lastNonZero] == '.') {
+                        mantissa.erase(lastNonZero);
+                    }
+                }
+
+                // 处理指数部分
+                int expValue = std::stoi(exponent);
+
+                // 重新构建科学计数法字符串
+                std::ostringstream result;
+                result << mantissa << 'e' << expValue;  // 直接输出指数，不带+号和前导零
+
+                return result.str();
+            } else if (isIntegerValue) {
+                // 对于整数值的浮点数，强制添加 .0
+                oss << std::fixed << std::setprecision(1) << num;
+                return oss.str();
+            } else {
+                // 常规表示法
+                oss << std::setprecision(std::numeric_limits<double>::max_digits10);
+                oss << num;
+
+                std::string str = oss.str();
+//
+//
+//                // 安全地移除末尾无意义的零
+//                size_t dotPos = str.find('.');
+//                if (dotPos != std::string::npos) {
+//                    size_t lastNonZero = str.find_last_not_of('0');
+//                    if (lastNonZero == dotPos) {
+//                        // 保留小数点后一位零
+//                        if (dotPos + 2 <= str.size()) {
+//                            str.erase(dotPos + 2);
+//                        } else {
+//                            //                        str += "0";
+//                        }
+//                    } else if (lastNonZero != std::string::npos && lastNonZero + 1 < str.size()) {
+//                        str.erase(lastNonZero + 1);
+//                    }
+//                }
+                return str;
+            }
+        }
+    }
+
     inline static void
     stringifyDouble(const TomlValue& value, std::ostringstream& oss, int indent, int level) {
         auto num = value.get<double>();
-        if (std::isinf(num)) {
-            std::string v;
-            if (std::signbit(num)) {
-                v = "-inf";
-            } else {
-                v = "inf";
-            }
-            stringifyLeaf("float", v, oss, indent, level);
-        } else if (std::isnan(num)) {
-            stringifyLeaf("float", "nan", oss, indent, level);
-        } else {
-            std::ostringstream vss;
-            vss << std::setprecision(std::numeric_limits<double>::max_digits10) << num;
-            stringifyLeaf("float", vss.str(), oss, indent, level);
-        }
+        stringifyLeaf("float", stringifyDouble(num), oss, indent, level);
     }
 
     inline static void
@@ -203,6 +277,7 @@ int main() {
     std::string tomlStr = buffer.str();
     try {
         TomlValue toml = parser::parse(tomlStr);
+        toml           = parser::parse(toml.toString());
         std::cout << TomlStringifyer::stringify(toml, 4) << std::endl;
         return 0;
     } catch (const std::runtime_error& e) {

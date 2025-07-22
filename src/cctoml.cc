@@ -89,17 +89,18 @@ void TomlDate::parseSubSecond(const std::string_view& sv, size_t& position) {
     }
 
     if (position == fracStart) {
-        throw std::invalid_argument("'.' must be followed by digits in string: " + std::string(sv));
+        throw TomlException("'.' must be followed by digits in string: " + std::string(sv));
     }
 
     // 提取小数部分并转换为纳秒
     std::string sub(sv.substr(fracStart, position - fracStart));
-    sub.resize(9, '0');  // 补零至9位(纳秒精度)
-
+    // 补零至9位(纳秒精度)
+    sub.resize(9, '0');
+    // 字符串转数字
     int64_t subSecond = 0;
     auto [ptr, ec]    = std::from_chars(sub.data(), sub.data() + sub.size(), subSecond);
     if (ec != std::errc() && ptr != sub.data() + sub.size()) {
-        throw std::invalid_argument("Invalid fractional second in string: " + std::string(sv));
+        throw TomlException("Invalid fractional second in string: " + std::string(sv));
     }
 
     m_subSecond = subSecond;
@@ -124,13 +125,13 @@ void TomlDate::parseTimezoneOffset(const std::string_view& sv, size_t& position)
     // 解析时区偏移 ±HH:MM
     auto offsetHour = ParseDigits(sv, position, 2);
     if (!offsetHour || *offsetHour > 23 || position >= sv.size() || sv[position] != ':') {
-        throw std::invalid_argument("Invalid timezone offset hour in string: " + std::string(sv));
+        throw TomlException("Invalid timezone offset hour in string: " + std::string(sv));
     }
     position++;
 
     auto offsetMinute = ParseDigits(sv, position, 2);
     if (!offsetMinute || *offsetMinute > 59) {
-        throw std::invalid_argument("Invalid timezone offset minute in string: " + std::string(sv));
+        throw TomlException("Invalid timezone offset minute in string: " + std::string(sv));
     }
 
     const int sign = (offsetChar == '+') ? 1 : -1;
@@ -209,7 +210,21 @@ bool TomlDate::parseDateTime(const std::string_view& sv) {
     position++;
 
     auto day = ParseDigits(sv, position, 2);
-    if (!day || *day < 1 || *day > 31) {
+    if (!day || *day < 1) {
+        return false;
+    }
+
+    // 验证每月的有效天数（考虑闰年）
+    const bool           isLeapYear    = (*year % 4 == 0 && *year % 100 != 0) || (*year % 400 == 0);
+    static constexpr int daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    int                  maxDays       = daysInMonth[*month - 1];
+
+    // 闰年2月多一天
+    if (*month == 2 && isLeapYear) {
+        maxDays = 29;
+    }
+
+    if (*day > maxDays) {
         return false;
     }
 
@@ -226,7 +241,7 @@ bool TomlDate::parseDateTime(const std::string_view& sv) {
 
     // 检查日期和时间之间的分隔符
     if (sv[position] != 'T' && sv[position] != 't' && sv[position] != ' ') {
-        throw std::invalid_argument("Invalid separator after date in string: " + std::string(sv));
+        throw TomlException("Invalid separator after date in string: " + std::string(sv));
     }
     position++;
 
@@ -238,7 +253,7 @@ void TomlDate::parse(const std::string_view& sv) {
     // 为确保重入安全，先清空所有可选成员
     this->reset();
     if (sv.empty()) {
-        throw std::invalid_argument("Cannot parse an empty string.");
+        throw TomlException("Cannot parse an empty string.");
     }
     // 尝试按优先级解析不同格式
     if (parseDateTime(sv)) {
@@ -250,14 +265,14 @@ void TomlDate::parse(const std::string_view& sv) {
     }
     // 所有解析尝试均失败
     this->reset();
-    throw std::invalid_argument("String does not match any valid TOML date/time format: " +
-                                std::string(sv));
+    throw TomlException("String does not match any valid TOML date/time format: " +
+                        std::string(sv));
 }
 
 std::string TomlDate::toString() const {
     std::ostringstream oss;
     oss << std::setfill('0');
-
+    // YYYY-MM-dd
     auto year = getYear();
     if (year.has_value()) {
         auto month = getMonth();
@@ -269,7 +284,7 @@ std::string TomlDate::toString() const {
             oss << 'T';
         }
     }
-
+    // hh:mm:ss
     auto hour = getHour();
     if (hour.has_value()) {
         auto minute = getMinute();
@@ -290,7 +305,7 @@ std::string TomlDate::toString() const {
     auto tzOffset = getTzOffset();
     if (tzOffset.has_value()) {
         if (*tzOffset == 0) {
-            oss << "000Z";
+            oss << "Z";
         } else {
             auto offsetVal = *tzOffset;
             // 输出符号
@@ -306,8 +321,7 @@ std::string TomlDate::toString() const {
 
 std::chrono::system_clock::time_point TomlDate::toSystemTimePoint() const {
     if (!isOffsetDateTime()) {
-        throw std::logic_error(
-            "Only OffsetDateTime can be converted to a system_clock::time_point.");
+        throw TomlException("Only OffsetDateTime can be converted to a system_clock::time_point.");
     }
 
     std::tm tm  = {};
@@ -322,7 +336,7 @@ std::chrono::system_clock::time_point TomlDate::toSystemTimePoint() const {
     // timegm converts a struct tm (in UTC) to time_t
     std::time_t time = timegm(&tm);
     if (time == -1) {
-        throw std::runtime_error("Failed to convert to time_t.");
+        throw TomlException("Failed to convert to time_t.");
     }
 
     auto timePoint = std::chrono::system_clock::from_time_t(time);
@@ -465,6 +479,10 @@ void TomlValue::destroyValue() noexcept {
             delete m_value.string;
             m_value.string = nullptr;
             break;
+        case TomlType::Date:
+            delete m_value.date;
+            m_value.date = nullptr;
+            break;
         case TomlType::Array:
             delete m_value.array;
             m_value.array = nullptr;
@@ -516,7 +534,7 @@ TomlValue& TomlValue::push_back(const TomlValue& value) {
  * @param position 当前读取位置（会被修改）
  *
  * @note 先跳过空白，再处理注释
- * @note 注释以#开始直到行尾（\n或\r）
+ * @note 注释以#开始直到行尾（\\n或\\r）
  * @note 注释中禁止出现除制表符外的控制字符
  */
 #define SKIP_WHITESPACE_AND_COMMENT(data, position)                                                \
@@ -558,12 +576,14 @@ TomlValue& TomlValue::push_back(const TomlValue& value) {
  */
 #define SKIP_CRLF(data, position)                                                                  \
     do {                                                                                           \
-        if (position < data.size() && data[position] == '\r') {                                    \
+        if (position < data.size() && data[position] == '\r' && position + 1 < data.size() &&      \
+            data[position + 1] == '\n') {                                                          \
+            /* 必须要\r\n才能换行,单独一个回车符不被toml允许 */                  \
+            position += 2;                                                                         \
+        } else if (position < data.size() && data[position] == '\n') {                             \
             ++position;                                                                            \
         }                                                                                          \
-        if (position < data.size() && data[position] == '\n') {                                    \
-            ++position;                                                                            \
-        }                                                                                          \
+                                                                                                   \
     } while (false)
 
 /**
@@ -599,8 +619,8 @@ parseTableHeader(const std::string_view& data, size_t& position, bool isArray);
 static TomlString
 parseBareKey(const std::string_view& data, size_t& position, bool isTable = false);
 static TomlString parseQuotedKeys(const std::string_view& data, size_t& position);
-static std::pair<std::vector<TomlString>, TomlValue> parseKeyValue(const std::string_view& data,
-                                                                   size_t& position);
+static std::pair<std::vector<TomlString>, TomlValue>
+parseKeyValue(const std::string_view& data, size_t& position, bool needCrlf = true);
 static TomlValue   parseValue(const std::string_view& data, size_t& position);
 static TomlValue   parseNumber(const std::string_view& data, size_t& position);
 static TomlValue   parseNumberOrDate(const std::string_view& data, size_t& position);
@@ -624,7 +644,7 @@ static std::string parseMultiLiteralString(const std::string_view& data, size_t&
  * @param position 开始检查的索引位置。
  * @return 如果看起来像日期或时间，则为 true，否则为 false。
  */
-static bool LooksLikeDateTime(const std::string_view& sv, size_t position) noexcept;
+static bool looksLikeDateTime(const std::string_view& sv, size_t position) noexcept;
 /**
  * @brief 精确、高性能地验证一个字符串视图是否完全匹配TOML的四种日期时间格式之一。
  *
@@ -634,7 +654,7 @@ static bool LooksLikeDateTime(const std::string_view& sv, size_t position) noexc
  * @param data 要验证的完整字符串视图。
  * @return 如果完全匹配，则为 true，否则为 false。
  */
-static bool MatchFullDateTime(const std::string_view& data) noexcept;
+static bool matchFullDateTime(const std::string_view& data) noexcept;
 
 static std::vector<std::pair<std::vector<std::string>, TomlValue>>
 parseKeyValuePairs(std::string_view data, size_t& position) {
@@ -722,8 +742,8 @@ TomlString parseQuotedKeys(const std::string_view& data, size_t& position) {
     }
 }
 
-std::pair<std::vector<TomlString>, TomlValue> parseKeyValue(const std::string_view& data,
-                                                            size_t&                 position) {
+std::pair<std::vector<TomlString>, TomlValue>
+parseKeyValue(const std::string_view& data, size_t& position, bool needCrlf) {
     // 当前data[position]一定有意义
     std::vector<TomlString> keys;
     auto                    size = data.size();
@@ -755,11 +775,11 @@ std::pair<std::vector<TomlString>, TomlValue> parseKeyValue(const std::string_vi
     auto value = parseValue(data, position);
     SKIP_WHITESPACE_AND_COMMENT(data, position);
     // 换行
-    if (position < size &&
+    if (needCrlf && position < size &&
         (data[position] == '\r' || data[position] == '\n' || data[position] == '}' ||
          data[position] == ']' || data[position] == ',')) {
         SKIP_CRLF(data, position);
-    } else if (position < size) {
+    } else if (needCrlf && position < size) {
         throw TomlParseException("A line break is required after the value", position);
     }
     return {keys, value};
@@ -965,7 +985,7 @@ TomlValue parseNumber(const std::string_view& data, size_t& position) {
 TomlValue parseNumberOrDate(const std::string_view& data, size_t& position) {
     size_t original = position;
     // 判断是否为日期
-    if (LooksLikeDateTime(data, position)) {
+    if (looksLikeDateTime(data, position)) {
         // 完整匹配
         size_t end         = position;
         auto   isValidChar = [](char c) -> bool {
@@ -980,9 +1000,11 @@ TomlValue parseNumberOrDate(const std::string_view& data, size_t& position) {
         // 可能的日期字符串
         auto maybeDate = data.substr(position, end - position);
         // 判断是否为日期
-        if (MatchFullDateTime(maybeDate)) {
+        if (matchFullDateTime(maybeDate)) {
             position = end;
-            return TomlDate(maybeDate);
+            try {
+                return TomlDate(maybeDate);
+            } catch (const TomlException& e) { throw TomlParseException(e.what(), position); }
         }
     }
     // 回退并作为普通数值解析
@@ -1007,24 +1029,39 @@ TomlValue parseNumberOrDate(const std::string_view& data, size_t& position) {
         }                                                                                          \
     } while (false)
 
+#define PARSE_STATE_INIT (0)
+#define PARSE_STATE_HAS_VALUE (1)
+#define PARSE_STATE_NO_VALUE (2)
+
 TomlValue parseArray(const std::string_view& data, size_t& position) {
     // 当前字符一定为[
     position++;
     SKIP_ALL(data, position);
-    // 解析以,分割的一个个value
+    // 解析以,分割的一个个value (而不是key-value)
     TomlArray array;
-    bool      expectReturn = false;
+    // 0 -> init
+    // 1 -> has value
+    // 2 -> no value
+    char state = PARSE_STATE_INIT;
     while (position < data.size()) {
         SKIP_ALL(data, position);
+        // 遇到]说明结束了
         if (data[position] == ']') {
             position++;
             return array;
         }
-        array.emplace_back(parseValue(data, position));
+        if (state != PARSE_STATE_NO_VALUE) {
+            array.emplace_back(parseValue(data, position));
+        } else {
+            throw TomlParseException("Unexpected value after empty array element", position);
+        }
         SKIP_ALL(data, position);
         // 如果为,则说明还有值,否则则应该return了
         if (position < data.size() && data[position] == ',') {
             position++;
+            state = PARSE_STATE_HAS_VALUE;
+        } else {
+            state = PARSE_STATE_NO_VALUE;
         }
     }
     throw TomlParseException("Unclosed array: missing ']'", position);
@@ -1034,50 +1071,68 @@ TomlValue parseObject(const std::string_view& data, size_t& position) {
     // 当前一定为{ (object不同于array,不允许换行)
     position++;
     TomlValue object;
-    bool      needValue = false;
+    // 0 -> init
+    // 1 -> has value
+    // 2 -> no value
+    char state = PARSE_STATE_INIT;
     while (position < data.size()) {
         SKIP_WHITESPACE_AND_COMMENT(data, position);
         if (data[position] == '}') {
             // 在内联表中的最后一个键/值对之后，不允许终止逗号
-            if (!needValue) {
+            if (state != PARSE_STATE_HAS_VALUE) {
                 position++;
                 return object;
             } else {
                 break;
             }
         }
-        // 解析一个个key-value
-        auto node    = &object;
-        auto [ks, v] = parseKeyValue(data, position);
-        for (size_t i = 0; !ks.empty() && i < ks.size() - 1; i++) {
-            if (node->isObject()) {
-                node = &(*node)[ks[i]];
-            } else {
-                throw TomlParseException("Cannot create nested key: parent is not an object",
-                                         position);
+        if (state != PARSE_STATE_NO_VALUE) {
+            // 解析一个个key-value
+            auto node    = &object;
+            auto [ks, v] = parseKeyValue(data, position, false);
+            for (size_t i = 0; !ks.empty() && i < ks.size() - 1; i++) {
+                // 这里的node必须为object,因为内联表里为key-value形式，但array内只有value形式
+                if (node->isObject()) {
+                    node = &(*node)[ks[i]];
+                } else {
+                    throw TomlParseException("Cannot create nested key: parent is not an object",
+                                             position);
+                }
             }
-        }
-        if (node->isObject()) {
-            node->set(ks.back(), v);
+            // 最后获取的node也必须为object
+            if (node->isObject()) {
+                node->set(ks.back(), v);
+            } else {
+                throw TomlParseException("Cannot set value: target is not an object", position);
+            }
         } else {
-            throw TomlParseException("Cannot set value: target is not an object", position);
+            throw TomlParseException("Unexpected value after empty array element", position);
         }
+
+        // 跳过空白及注释
         SKIP_WHITESPACE_AND_COMMENT(data, position);
+        // 判断是否还有值
         if (position < data.size() && data[position] == ',') {
-            needValue = true;
+            state = PARSE_STATE_HAS_VALUE;
             position++;
         } else {
-            needValue = false;
+            state = PARSE_STATE_NO_VALUE;
         }
     }
     throw TomlParseException("Unclosed object: missing '}'", position);
 }
 
 #undef SKIP_ALL
+#undef PARSE_STATE_INIT
+#undef PARSE_STATE_HAS_VALUE
+#undef PARSE_STATE_NO_VALUE
 
 #define MATCH3(sv, pos, ch)                                                                        \
     ((pos) + 2 < (sv).size() && (sv)[pos] == (ch) && (sv)[(pos) + 1] == (ch) &&                    \
      (sv)[(pos) + 2] == (ch))
+#define IS_CRLF(data, position)                                                                    \
+    ((data[position] == '\n') ||                                                                   \
+     (data[position] == '\r' && position + 1 < data.size() && data[position + 1] == '\n'))
 
 TomlValue parseString(const std::string_view& data, size_t& position) {
     // 判断是哪种类型
@@ -1250,23 +1305,24 @@ std::string parseMultiBasicString(const std::string_view& data, size_t& position
                 inEscape = true;
             } else {
                 // 2. 不存在字符才可能为\换行
-                if (position < data.size() && (data[position] == '\r' || data[position] == '\n' ||
-                                               data[position] == ' ' || data[position] == '\t')) {
+                if (position < data.size() &&
+                    (IS_CRLF(data, position) || data[position] == ' ' || data[position] == '\t')) {
                     // 遇到了toml语法中的\换行
                     // 当一行的最后一个非空白字符是未被转义的
                     // \ 时，它会连同它后面的所有空白（包括换行）一起被去除，直到下一个非空白字符或结束引号为止。
                     // 处理\后面的空白
                     while (position < data.size() &&
-                           (data[position] == '\r' || data[position] == '\n' ||
-                            data[position] == ' ' || data[position] == '\t')) {
+                           (IS_CRLF(data, position) || data[position] == ' ' ||
+                            data[position] == '\t')) {
                         position++;
                     }
                 } else {
                     inEscape = true;  // 普通转义字符，下一个字符特殊处理
                 }
             }
-        } else if ((0x0000 <= c && c <= 0x0008) || c == 0x000B || c == 0x000C ||
-                   (0x000E <= c && c <= 0x001F) || c == 0x007F) {
+        } else if (((0x0000 <= c && c <= 0x0008) || c == 0x000B || c == 0x000C ||
+                    (0x000E <= c && c <= 0x001F) || c == 0x007F) ||
+                   (c == '\r' && position < data.size() && data[position] != '\n')) {
             throw TomlParseException(
                 "Any Unicode character can be used, except for those that must be escaped: "
                 "backslashes and control characters except tabs, line breaks, and carriage returns",
@@ -1344,8 +1400,9 @@ std::string parseMultiLiteralString(const std::string_view& data, size_t& positi
                 position += 3;
                 return result;
             }
-        } else if (((0x0000 <= c && c <= 0x001F) || (c == 0x007F)) && c != 0x0009 && c != '\r' &&
-                   c != '\n') {
+        } else if ((((0x0000 <= c && c <= 0x001F) || (c == 0x007F)) && c != 0x0009 && c != '\r' &&
+                    c != '\n') ||
+                   (c == '\r' && position + 1 < data.size() && data[position + 1] != '\n')) {
             throw TomlParseException(
                 "All control characters other than tabs are not allowed in multi-literal strings",
                 position);
@@ -1358,7 +1415,7 @@ std::string parseMultiLiteralString(const std::string_view& data, size_t& positi
 
 #undef MATCH3
 
-bool LooksLikeDateTime(const std::string_view& sv, size_t position) noexcept {
+bool looksLikeDateTime(const std::string_view& sv, size_t position) noexcept {
     // 检查 "YYYY-" 模式
     if (position + 5 <= sv.length()) {
         if (IS_DIGIT(sv[position]) && IS_DIGIT(sv[position + 1]) && IS_DIGIT(sv[position + 2]) &&
@@ -1377,127 +1434,121 @@ bool LooksLikeDateTime(const std::string_view& sv, size_t position) noexcept {
     return false;
 }
 
-bool MatchFullDateTime(const std::string_view& data) noexcept {
+bool matchFullDateTime(const std::string_view& data) noexcept {
     if (data.empty()) {
         return false;
     }
 
-    size_t       pos = 0;
-    const size_t len = data.length();
+    size_t       position = 0;
+    const size_t size     = data.size();
 
     // -----------------------------------------------------------------
     // 分支 1: 尝试解析以日期 (YYYY-MM-DD) 开头的格式
     // -----------------------------------------------------------------
-    if (len >= 10 && (data[0] >= '0' && data[0] <= '9') && (data[1] >= '0' && data[1] <= '9') &&
-        (data[2] >= '0' && data[2] <= '9') && (data[3] >= '0' && data[3] <= '9') &&
-        (data[4] == '-') && (data[5] >= '0' && data[5] <= '9') &&
-        (data[6] >= '0' && data[6] <= '9') && (data[7] == '-') &&
-        (data[8] >= '0' && data[8] <= '9') && (data[9] >= '0' && data[9] <= '9')) {
+    if (size >= 10 && IS_DIGIT(data[0]) && IS_DIGIT(data[1]) && IS_DIGIT(data[2]) &&
+        IS_DIGIT(data[3]) && (data[4] == '-') && IS_DIGIT(data[5]) && IS_DIGIT(data[6]) &&
+        (data[7] == '-') && IS_DIGIT(data[8]) && IS_DIGIT(data[9])) {
         // 检查月份和日期的数值范围
         const int month = (data[5] - '0') * 10 + (data[6] - '0');
         const int day   = (data[8] - '0') * 10 + (data[9] - '0');
 
         if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
             // ---- 日期部分有效 ----
-            pos = 10;
+            position = 10;
 
             // 如果字符串到此结束, 则是合法的 Local Date
-            if (pos == len) {
+            if (position == size) {
                 return true;
             }
 
             // 如果后面有内容, 分隔符必须是 'T', 't', 或空格
-            if (data[pos] != 'T' && data[pos] != 't' && data[pos] != ' ') {
+            if (data[position] != 'T' && data[position] != 't' && data[position] != ' ') {
                 return false;
             }
-            pos++;  // 消耗分隔符
+            position++;  // 消耗分隔符
 
             // ---- 解析时间部分 (hh:mm:ss) ----
-            if (pos + 8 > len)
+            if (position + 8 > size) {
                 return false;
-            const int hour   = (data[pos] - '0') * 10 + (data[pos + 1] - '0');
-            const int minute = (data[pos + 3] - '0') * 10 + (data[pos + 4] - '0');
-            const int second = (data[pos + 6] - '0') * 10 + (data[pos + 7] - '0');
+            }
+            const int hour   = (data[position] - '0') * 10 + (data[position + 1] - '0');
+            const int minute = (data[position + 3] - '0') * 10 + (data[position + 4] - '0');
+            const int second = (data[position + 6] - '0') * 10 + (data[position + 7] - '0');
 
-            if (!((data[pos] >= '0' && data[pos] <= '9') &&
-                  (data[pos + 1] >= '0' && data[pos + 1] <= '9') && (data[pos + 2] == ':') &&
-                  (data[pos + 3] >= '0' && data[pos + 3] <= '9') &&
-                  (data[pos + 4] >= '0' && data[pos + 4] <= '9') && (data[pos + 5] == ':') &&
-                  (data[pos + 6] >= '0' && data[pos + 6] <= '9') &&
-                  (data[pos + 7] >= '0' && data[pos + 7] <= '9') &&
+            if (!(IS_DIGIT(data[position]) && IS_DIGIT(data[position + 1]) &&
+                  (data[position + 2] == ':') && IS_DIGIT(data[position + 3]) &&
+                  IS_DIGIT(data[position + 4]) && (data[position + 5] == ':') &&
+                  IS_DIGIT(data[position + 6]) && IS_DIGIT(data[position + 7]) &&
                   (hour <= 23 && minute <= 59 && second <= 59))) {
                 return false;
             }
-            pos += 8;
+            position += 8;
 
             // ---- 解析可选的亚秒部分 (.ffffff) ----
-            if (pos < len && data[pos] == '.') {
-                pos++;
-                const size_t frac_start = pos;
-                while (pos < len && (data[pos] >= '0' && data[pos] <= '9')) {
-                    pos++;
+            if (position < size && data[position] == '.') {
+                position++;
+                const size_t fracStart = position;
+                while (position < size && IS_DIGIT(data[position])) {
+                    position++;
                 }
-                if (pos == frac_start)
+                if (position == fracStart)
                     return false;
             }
 
             // ---- 解析可选的时区偏移部分 ----
-            if (pos < len) {
-                const char offset_char = data[pos];
+            if (position < size) {
+                const char offset_char = data[position];
                 if (offset_char == 'Z' || offset_char == 'z') {
-                    pos++;
+                    position++;
                 } else if (offset_char == '+' || offset_char == '-') {
-                    pos++;
-                    if (pos + 5 > len)
+                    position++;
+                    if (position + 5 > size)
                         return false;
-                    const int off_hour = (data[pos] - '0') * 10 + (data[pos + 1] - '0');
-                    const int off_min  = (data[pos + 3] - '0') * 10 + (data[pos + 4] - '0');
+                    const int off_hour = (data[position] - '0') * 10 + (data[position + 1] - '0');
+                    const int off_min =
+                        (data[position + 3] - '0') * 10 + (data[position + 4] - '0');
 
-                    if (!((data[pos] >= '0' && data[pos] <= '9') &&
-                          (data[pos + 1] >= '0' && data[pos + 1] <= '9') &&
-                          (data[pos + 2] == ':') &&
-                          (data[pos + 3] >= '0' && data[pos + 3] <= '9') &&
-                          (data[pos + 4] >= '0' && data[pos + 4] <= '9') &&
-                          (off_hour <= 23 && off_min <= 59))) {
+                    if (!(IS_DIGIT(data[position]) && IS_DIGIT(data[position + 1]) &&
+                          (data[position + 2] == ':') && IS_DIGIT(data[position + 3]) &&
+                          IS_DIGIT(data[position + 4]) && (off_hour <= 23 && off_min <= 59))) {
                         return false;
                     }
-                    pos += 5;
+                    position += 5;
                 }
             }
 
             // 最终检查: 必须消耗掉整个字符串
-            return pos == len;
+            return position == size;
         }
     }
 
     // -----------------------------------------------------------------
     // 分支 2: 尝试解析纯时间格式 (hh:mm:ss)
     // -----------------------------------------------------------------
-    pos = 0;
-    if (len >= 8 && (data[pos + 2] == ':') && (data[pos + 5] == ':') &&
-        (data[pos] >= '0' && data[pos] <= '9') && (data[pos + 1] >= '0' && data[pos + 1] <= '9') &&
-        (data[pos + 3] >= '0' && data[pos + 3] <= '9') &&
-        (data[pos + 4] >= '0' && data[pos + 4] <= '9') &&
-        (data[pos + 6] >= '0' && data[pos + 6] <= '9') &&
-        (data[pos + 7] >= '0' && data[pos + 7] <= '9')) {
-        const int hour   = (data[pos] - '0') * 10 + (data[pos + 1] - '0');
-        const int minute = (data[pos + 3] - '0') * 10 + (data[pos + 4] - '0');
-        const int second = (data[pos + 6] - '0') * 10 + (data[pos + 7] - '0');
+    position = 0;
+    if (size >= 8 && (data[position + 2] == ':') && (data[position + 5] == ':') &&
+        IS_DIGIT(data[position]) && IS_DIGIT(data[position + 1]) && IS_DIGIT(data[position + 3]) &&
+        IS_DIGIT(data[position + 4]) && IS_DIGIT(data[position + 6]) &&
+        IS_DIGIT(data[position + 7])) {
+        const int hour   = (data[position] - '0') * 10 + (data[position + 1] - '0');
+        const int minute = (data[position + 3] - '0') * 10 + (data[position + 4] - '0');
+        const int second = (data[position + 6] - '0') * 10 + (data[position + 7] - '0');
 
         if (hour <= 23 && minute <= 59 && second <= 59) {
-            pos += 8;
+            position += 8;
 
-            if (pos < len && data[pos] == '.') {
-                pos++;
-                const size_t frac_start = pos;
-                while (pos < len && (data[pos] >= '0' && data[pos] <= '9')) {
-                    pos++;
+            if (position < size && data[position] == '.') {
+                position++;
+                const size_t fracStart = position;
+                while (position < size && IS_DIGIT(data[position])) {
+                    position++;
                 }
-                if (pos == frac_start)
+                if (position == fracStart) {
                     return false;
+                }
             }
 
-            return pos == len;
+            return position == size;
         }
     }
 
@@ -1522,7 +1573,7 @@ namespace parser {
                     if (node->isObject()) {
                         node = &(*node)[k[i]];
                     } else {
-                        throw TomlException("node is not a object");
+                        throw TomlParseException("node is not a object", position);
                     }
                 }
                 if (node->isObject()) {
@@ -1532,8 +1583,9 @@ namespace parser {
                         throw TomlParseException("key '" + k.back() + "' has existed", position);
                     }
                 } else {
-                    throw TomlParseException("not a object", position);
+                    throw TomlParseException("node is not a object", position);
                 }
+                // todo
             }
         }
         // 2. 解析[]中的内容
@@ -1555,7 +1607,7 @@ namespace parser {
             auto headers = parseTableHeader(data, position, isArray);
             // 表头后可能存在空白和注释
             SKIP_WHITESPACE_AND_COMMENT(data, position);
-            // 表头需要换货
+            // 表头需要换行
             if (position < size && data[position] != '\r' && data[position] != '\n') {
                 throw TomlParseException("A line break is required after the value", position);
             }
@@ -1563,36 +1615,41 @@ namespace parser {
 
             // 解析下面的key-value
             auto keyValues = parseKeyValuePairs(data, position);
+
+#define GET_TARGET_NODE(key)                                                                                   \
+    do {                                                                                                       \
+        if (node->isObject()) {                                                                                \
+            /* 如果node是一个object, 那么直接获取其key(不存在则会自动创建) */             \
+            node = &(*node)[key];                                                                              \
+        } else if (node->isArray()) {                                                                          \
+            /* 如果node是一个array, 那么其内容可能不存在,则需要对array推入一个object */ \
+            auto& array = node->asArray();                                                                     \
+            if (array.empty()) {                                                                               \
+                array.emplace_back(TomlObject{{key, TomlValue()}});                                            \
+            } else {                                                                                           \
+                /* 找到最近的那个object对象 */                                                        \
+                if (auto it =                                                                                  \
+                        std::find_if(array.rbegin(), array.rend(),                                             \
+                                     [](const auto& element) { return element.isObject(); });                  \
+                    it != array.rend()) {                                                                      \
+                    if (it->asObject().find(key) == it->asObject().end()) {                                    \
+                        it->set(key, isArray ? TomlArray() : TomlValue());                                     \
+                    }                                                                                          \
+                } else {                                                                                       \
+                    array.emplace_back(TomlObject{{key, TomlValue()}});                                        \
+                }                                                                                              \
+            }                                                                                                  \
+            node = &(array.back()[key]);                                                                       \
+        } else {                                                                                               \
+            throw TomlParseException("node should be a array or object", position);                            \
+        }                                                                                                      \
+    } while (false)
+
             // key-values解析完毕, 根据表头添加数据
             // 查找要添加的表节点
             TomlValue* node = &root;
             for (size_t i = 0; !headers.empty() && i < headers.size() - 1; i++) {
-                if (node->isObject()) {
-                    node = &(*node)[headers[i]];
-                } else if (node->isArray()) {
-                    auto& array = node->asArray();
-                    // 获取node的一个back
-                    if (array.empty()) {
-                        // 创建一个object推入node中
-                        array.emplace_back(TomlObject{{headers[i], TomlValue()}});
-                    } else {
-                        if (auto it = std::find_if(
-                                array.rbegin(), array.rend(),
-                                [](const auto& element) { return element.isObject(); });
-                            it != array.rend()) {
-                            // 找到了对象元素
-                            if (it->asObject().find(headers[i]) == it->asObject().end()) {
-                                it->set(headers[i], isArray ? TomlArray() : TomlValue());
-                            }
-                        } else {
-                            // 没有找到对象元素, 向array中放入一个空的{}
-                            array.emplace_back(TomlObject{{headers[i], TomlValue()}});
-                        }
-                    }
-                    node = &(node->asArray().back()[headers[i]]);
-                } else {
-                    throw TomlParseException("node should be a array or object", position);
-                }
+                GET_TARGET_NODE(headers[i]);
             }
             // 是array,当前node又是一个object
             // 相当于[[ a.b ]]的 a 为 node, b是headers.back()
@@ -1601,35 +1658,33 @@ namespace parser {
                 node->set(headers.back(), TomlArray());
             }
             // 如果不存在则会创建一个object
-            if (node->isObject()) {
-                node = &(*node)[headers.back()];
-            } else if (node->isArray()) {
-                // 获取node的一个back
-                auto& array = node->asArray();
-                if (array.empty()) {
-                    // 创建一个object推入node中
-                    array.emplace_back(TomlObject{{headers.back(), TomlValue()}});
-                } else {
-                    // 反向遍历是为了找到[该数组里最近定义的表元素]
-                    if (auto it =
-                            std::find_if(array.rbegin(), array.rend(),
-                                         [](const auto& element) { return element.isObject(); });
-                        it != array.rend()) {
-                        // 找到了对象元素
-                        if (it->asObject().find(headers.back()) == it->asObject().end()) {
-                            it->set(headers.back(), isArray ? TomlArray() : TomlValue());
-                        }
-                    } else {
-                        // 没有找到对象元素, 向array中放入一个空的{}
-                        array.emplace_back(TomlObject{{headers.back(), TomlValue()}});
-                    }
-                }
-                node = &(node->asArray().back()[headers.back()]);
-            }
+            GET_TARGET_NODE(headers.back());
             if (node->isArray() != isArray) {
                 throw TomlParseException("node is not a array", position);
             }
             // 对于当前节点赋值
+#undef GET_TARGET_NODE
+
+#define SET_VALUE_TO_NODE(root)                                                                    \
+    do {                                                                                           \
+        for (const auto& [ks, v] : keyValues) {                                                    \
+            auto* tempNode = root;                                                                 \
+            for (size_t i = 0; !ks.empty() && i < ks.size() - 1; i++) {                            \
+                if (!tempNode->isObject()) {                                                       \
+                    throw TomlParseException("Expected object in path", position);                 \
+                }                                                                                  \
+                tempNode = &(*tempNode)[ks[i]];                                                    \
+            }                                                                                      \
+            if (!tempNode->isObject()) {                                                           \
+                throw TomlParseException("Cannot set key on non-object", position);                \
+            }                                                                                      \
+            if (tempNode->asObject().find(ks.back()) != tempNode->asObject().end()) {              \
+                throw TomlParseException("Duplicate key '" + ks.back() + "'", position);           \
+            }                                                                                      \
+            tempNode->set(ks.back(), v);                                                           \
+        }                                                                                          \
+    } while (false)
+
             if (node->isArray()) {
                 // node是一个数组
                 if (keyValues.empty()) {
@@ -1637,24 +1692,12 @@ namespace parser {
                 } else {
                     // 新的数组对象
                     TomlValue parent;
-                    for (const auto& [ks, v] : keyValues) {
-                        TomlValue* tempNode = &parent;
-                        for (size_t i = 0; !ks.empty() && i < ks.size() - 1; i++) {
-                            tempNode = &(*tempNode)[ks[i]];
-                        }
-                        tempNode->set(ks.back(), v);
-                    }
+                    SET_VALUE_TO_NODE(&parent);
                     node->push_back(parent);
                 }
             } else {
                 // 对象
-                for (const auto& [ks, v] : keyValues) {
-                    auto tempNode = node;
-                    for (size_t i = 0; !ks.empty() && i < ks.size() - 1; i++) {
-                        tempNode = &(*tempNode)[ks[i]];
-                    }
-                    tempNode->set(ks.back(), v);
-                }
+                SET_VALUE_TO_NODE(node);
             }
         }
         // 跳过无用字符串
@@ -1664,6 +1707,7 @@ namespace parser {
         }
         return root;
     }
+#undef SET_VALUE_TO_NODE
 }  // namespace parser
 
 #undef SKIP_USELESS_CHAR
@@ -1671,53 +1715,147 @@ namespace parser {
 #undef SKIP_WHITESPACE_AND_COMMENT
 #undef SKIP_WHITESPACE
 
-static void        stringifyValue(const TomlValue& value, std::ostringstream& oss);
+static void stringifyValue(const TomlValue&      value,
+                           std::ostringstream&   oss,
+                           parser::StringifyType type   = parser::TO_TOML,
+                           int                   indent = 0,
+                           int                   level  = 0);
+/**
+ * @brief 序列化布尔值到输出流
+ * @param value TOML 值（布尔值）
+ * @param oss 输出字符串流
+ */
 inline static void stringifyBoolean(const TomlValue& value, std::ostringstream& oss);
 inline static void stringifyInteger(const TomlValue& value, std::ostringstream& oss);
 static void        stringifyDouble(const TomlValue& value, std::ostringstream& oss);
-static bool        stringIsBareKey(const std::string& s);
 inline static void stringifyString(const TomlValue& value, std::ostringstream& oss);
-static void        stringifyString(const std::string& s, std::ostringstream& oss);
+static std::string stringifyString(const std::string& s);
 inline static void stringifyDate(const TomlValue& value, std::ostringstream& oss);
-static void        stringifyArray(const TomlValue& value, std::ostringstream& oss);
-static void        stringifyInlineObject(const TomlObject& obj, std::ostringstream& oss);
+// toml专用
+static bool        stringIsBareKey(const std::string& s);
+static void        stringifyTomlArray(const TomlValue& value, std::ostringstream& oss);
+static void        stringifyInlineObject(const TomlObject& object, std::ostringstream& oss);
 static bool        isArrayOfTables(const TomlValue& value);
-inline static void stringifyObject(const TomlValue& value, std::ostringstream& oss);
+inline static void stringifyTomlObject(const TomlValue& value, std::ostringstream& oss);
 static void
-stringifyObject(const TomlObject& object, std::ostringstream& oss, const std::string& prefix);
+stringifyTomlObject(const TomlObject& object, std::ostringstream& oss, const std::string& prefix);
+// json专用
+static void
+stringifyJsonArray(const TomlValue& value, std::ostringstream& oss, int indent, int level);
+static void
+stringifyJsonObject(const TomlValue& value, std::ostringstream& oss, int indent, int level);
+// yaml专用
+static void
+stringifyYamlArray(const TomlValue& value, std::ostringstream& oss, int indent, int level);
+static void
+stringifyYamlObject(const TomlValue& value, std::ostringstream& oss, int indent, int level);
 
-void stringifyValue(const TomlValue& value, std::ostringstream& oss) {
+void stringifyValue(const TomlValue&      value,
+                    std::ostringstream&   oss,
+                    parser::StringifyType type,
+                    int                   indent,
+                    int                   level) {
     switch (value.type()) {
         case TomlType::Boolean: return stringifyBoolean(value, oss);
         case TomlType::Integer: return stringifyInteger(value, oss);
         case TomlType::Double: return stringifyDouble(value, oss);
         case TomlType::String: return stringifyString(value, oss);
-        case TomlType::Date: return stringifyDate(value, oss);
-        case TomlType::Array: return stringifyArray(value, oss);
-        case TomlType::Object: return stringifyObject(value, oss);
+        case TomlType::Date:
+            return stringifyDate(value, oss);
+            // 根据类型又可以分出json、toml、yaml的stringify方法
+        case TomlType::Array: {
+            switch (type) {
+                case parser::TO_TOML: return stringifyTomlArray(value, oss);
+                case parser::TO_YAML: return stringifyYamlArray(value, oss, indent, level);
+                case parser::TO_JSON: return stringifyJsonArray(value, oss, indent, level);
+            }
+        }
+        case TomlType::Object: {
+            switch (type) {
+                case parser::TO_TOML: return stringifyTomlObject(value, oss);
+                case parser::TO_YAML: return stringifyYamlObject(value, oss, indent, level);
+                case parser::TO_JSON: return stringifyJsonObject(value, oss, indent, level);
+            }
+        }
     }
 }
 
-inline void stringifyBoolean(const TomlValue& value, std::ostringstream& oss) {
+void stringifyBoolean(const TomlValue& value, std::ostringstream& oss) {
     oss << (value.get<bool>() ? "true" : "false");
 }
 
-inline void stringifyInteger(const TomlValue& value, std::ostringstream& oss) {
+void stringifyInteger(const TomlValue& value, std::ostringstream& oss) {
     oss << value.get<int64_t>();
 }
 
 void stringifyDouble(const TomlValue& value, std::ostringstream& oss) {
     auto num = value.get<double>();
-    if (std::isinf(num)) {
-        if (std::signbit(num)) {
-            oss << "-inf";
-        } else {
-            oss << "inf";
-        }
-    } else if (std::isnan(num)) {
+    // 处理特殊值
+    if (std::isnan(num)) {
         oss << "nan";
+    } else if (std::isinf(num)) {
+        oss << (num > 0 ? "inf" : "-inf");
     } else {
-        oss << std::setprecision(std::numeric_limits<double>::max_digits10) << num;
+        std::ostringstream vss;
+        vss.imbue(std::locale::classic());  // 确保使用点号作为小数点
+
+        // 检查是否为整数值但需要表示为浮点数
+        bool isIntegerValue =
+            (num == std::floor(num)) && (std::abs(num) < 1e14);  // 避免大整数精度问题
+
+        const double absValue = std::abs(num);
+
+        // 决定使用常规表示法还是科学计数法
+        bool useScientific = (absValue >= 1e6) || (absValue > 0 && absValue < 1e-4);
+
+        if (useScientific) {
+            // 科学计数法表示 - 先获取原始科学计数法字符串
+            vss << std::scientific << std::setprecision(15) << num;
+            std::string str = vss.str();
+
+            // 解析科学计数法的各个部分
+            size_t ePos = str.find_first_of("eE");
+            if (ePos == std::string::npos) {
+                // 不是科学计数法格式，直接返回
+                oss << str;
+                return;
+            }
+
+            // 分解为尾数和指数部分
+            std::string mantissa = str.substr(0, ePos);
+            std::string exponent = str.substr(ePos + 1);
+
+            // 处理尾数部分
+            // 移除尾数部分无意义的零
+            size_t lastNonZero = mantissa.find_last_not_of('0');
+            if (lastNonZero != std::string::npos) {
+                if (mantissa[lastNonZero] == '.') {
+                    mantissa.erase(lastNonZero);
+                }
+            }
+
+            // 处理指数部分
+            int expValue = std::stoi(exponent);
+
+            // 重新构建科学计数法字符串
+            std::ostringstream result;
+            // 直接输出指数，不带+号和前导零
+            result << mantissa << 'e' << expValue;
+
+            oss << result.str();
+            return;
+        } else if (isIntegerValue) {
+            // 对于整数值的浮点数，强制添加 .0
+            vss << std::fixed << std::setprecision(1) << num;
+            oss << vss.str();
+            return;
+        } else {
+            // 常规表示法
+            vss << std::setprecision(std::numeric_limits<double>::max_digits10);
+            vss << num;
+            oss << vss.str();
+            return;
+        }
     }
 }
 
@@ -1730,16 +1868,17 @@ bool stringIsBareKey(const std::string& s) {
     if (IS_DIGIT(s.front())) {
         return false;
     }
-    // 使用std::all_of检查剩余字符是否符合要求
-    return std::all_of(s.begin() + 1, s.end(),
+    // 使用std::all_of检查所有字符是否符合要求
+    return std::all_of(s.begin(), s.end(),
                        [](char c) { return std::isalnum(c) || c == '_' || c == '-'; });
 }
 
-inline void stringifyString(const TomlValue& value, std::ostringstream& oss) {
-    stringifyString(value.get<std::string>(), oss);
+void stringifyString(const TomlValue& value, std::ostringstream& oss) {
+    oss << stringifyString(value.asString());
 }
 
-void stringifyString(const std::string& s, std::ostringstream& oss) {
+std::string stringifyString(const std::string& s) {
+    std::ostringstream oss;
     oss << '"';
     for (char c : s) {
         auto uc = static_cast<unsigned char>(c);  // 处理负值字符
@@ -1760,18 +1899,18 @@ void stringifyString(const std::string& s, std::ostringstream& oss) {
             oss << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<int>(uc);
             continue;
         }
-
         // 非控制字符直接输出
         oss << c;
     }
     oss << '"';
+    return oss.str();
 }
 
-inline void stringifyDate(const TomlValue& value, std::ostringstream& oss) {
+void stringifyDate(const TomlValue& value, std::ostringstream& oss) {
     oss << value.asDate();
 }
 
-void stringifyArray(const TomlValue& value, std::ostringstream& oss) {
+void stringifyTomlArray(const TomlValue& value, std::ostringstream& oss) {
     const auto& array = value.get<TomlArray>();
     oss << "[";
     for (size_t i = 0; i < array.size(); ++i) {
@@ -1779,7 +1918,7 @@ void stringifyArray(const TomlValue& value, std::ostringstream& oss) {
             oss << ", ";
         }
         const auto& item = array[i];
-
+        // 表中的array就应该以inline形式输出
         if (item.type() == TomlType::Object) {
             stringifyInlineObject(item.get<TomlObject>(), oss);
         } else {
@@ -1789,17 +1928,28 @@ void stringifyArray(const TomlValue& value, std::ostringstream& oss) {
     oss << "]";
 }
 
-void stringifyInlineObject(const TomlObject& obj, std::ostringstream& oss) {
+void stringifyInlineObject(const TomlObject& object, std::ostringstream& oss) {
     oss << "{ ";
     bool first = true;
-    for (const auto& [key, val] : obj) {
+    for (const auto& [key, value] : object) {
         if (!first) {
             oss << ", ";
         }
         first = false;
         // 输出key和value
-        oss << '"' << key << "\" = ";
-        stringifyValue(val, oss);
+        if (stringIsBareKey(key)) {
+            // bare-key直接输出即可
+            oss << key;
+        } else {
+            // quoted-key使用stringify函数,因为可能存在unicode码
+            oss << stringifyString(key);
+        }
+        oss << " = ";
+        if (value.isObject()) {
+            stringifyInlineObject(value.asObject(), oss);
+        } else {
+            stringifyValue(value, oss);
+        }
     }
     oss << " }";
 }
@@ -1816,59 +1966,173 @@ bool isArrayOfTables(const TomlValue& value) {
                        [](const TomlValue& item) { return item.type() == TomlType::Object; });
 }
 
-inline void stringifyObject(const TomlValue& value, std::ostringstream& oss) {
-    stringifyObject(value.asObject(), oss, "");
+void stringifyTomlObject(const TomlValue& value, std::ostringstream& oss) {
+    stringifyTomlObject(value.asObject(), oss, "");
 }
 
-void stringifyObject(const TomlObject& object, std::ostringstream& oss, const std::string& prefix) {
-    // 🔹 1. 输出非 Object 的字段（顶层属性）
-    for (const auto& [key, val] : object) {
-        if (val.type() != TomlType::Object && !isArrayOfTables(val)) {
-            if (stringIsBareKey(key)) {
-                stringifyString(key, oss);
-                oss << " = ";
+void stringifyTomlObject(const TomlObject&   object,
+                         std::ostringstream& oss,
+                         const std::string&  prefix) {
+    // 1. 输出非 Object 的字段（顶层属性）
+    for (const auto& [k, v] : object) {
+        if (v.type() != TomlType::Object && !isArrayOfTables(v)) {
+            if (stringIsBareKey(k)) {
+                oss << k;
             } else {
-                oss << '"';
-                stringifyString(key, oss);
-                oss << "\" = ";
+                oss << stringifyString(k);
             }
-            stringifyValue(val, oss);
+            oss << " = ";
+            stringifyValue(v, oss);
             oss << "\n";
         }
     }
 
-    // 🔹 2. 输出子对象 [section] 和 表数组[[section]]
-    for (const auto& [key, val] : object) {
-        if (val.type() == TomlType::Object) {
-            const auto& child = val.get<TomlObject>();
+    // 2. 输出子对象 [section] 和 表数组[[section]]
+    for (const auto& [k, v] : object) {
+        if (v.type() == TomlType::Object) {
+            const auto& child = v.asObject();
             std::string fullKey;
             if (prefix.empty()) {
-                fullKey = key;
+                if (stringIsBareKey(k)) {
+                    fullKey = k;
+                } else {
+                    fullKey = stringifyString(k);
+                }
             } else {
-                fullKey.append(prefix).append(".").append(key);
+                fullKey.append(prefix).append(".");
+                if (stringIsBareKey(k)) {
+                    fullKey += k;
+                } else {
+                    fullKey += stringifyString(k);
+                }
             }
             oss << "\n[" << fullKey << "]\n";
-            stringifyObject(child, oss, fullKey);
-        } else if (isArrayOfTables(val)) {
-            const auto& array = val.asArray();
+            stringifyTomlObject(child, oss, fullKey);
+        } else if (isArrayOfTables(v)) {
+            const auto& array = v.asArray();
             std::string fullKey;
             if (prefix.empty()) {
-                fullKey = key;
+                if (stringIsBareKey(k)) {
+                    fullKey = k;
+                } else {
+                    fullKey = "\"" + stringifyString(k) + "\"";
+                }
             } else {
-                fullKey.append(prefix).append(".").append(key);
+                fullKey.append(prefix).append(".");
+                if (stringIsBareKey(k)) {
+                    fullKey += k;
+                } else {
+                    fullKey += stringifyString(k);
+                }
             }
             for (const auto& elem : array) {
                 oss << "\n[[" << fullKey << "]]\n";
-                stringifyObject(elem.asObject(), oss, fullKey);
+                stringifyTomlObject(elem.asObject(), oss, fullKey);
             }
+        }
+    }
+}
+
+void stringifyJsonArray(const TomlValue& value, std::ostringstream& oss, int indent, int level) {
+    const auto& array = value.get<TomlArray>();
+    if (array.empty()) {
+        oss << "[]";
+        return;
+    }
+    oss << "[";
+    for (size_t i = 0; i < array.size(); i++) {
+        if (i > 0) {
+            oss << ",";
+        }
+        if (indent != 0) {
+            oss << "\n";
+        }
+        oss << std::string((level + 1) * indent, ' ');
+        stringifyValue(array[i], oss, parser::StringifyType::TO_JSON, indent, level + 1);
+    }
+    if (indent != 0) {
+        oss << "\n" << std::string(level * indent, ' ');
+    }
+    oss << "]";
+}
+
+void stringifyJsonObject(const TomlValue& value, std::ostringstream& oss, int indent, int level) {
+    const auto& object = value.get<TomlObject>();
+    if (object.empty()) {
+        oss << "{}";
+        return;
+    }
+    oss << "{";
+    bool first = true;
+    for (const auto& [k, v] : object) {
+        if (!first) {
+            oss << ',';
+        }
+        if (indent != 0) {
+            oss << "\n";
+        }
+        oss << std::string((level + 1) * indent, ' ');
+        first = false;
+        stringifyString(k, oss);
+        oss << ": ";
+        stringifyValue(v, oss, parser::StringifyType::TO_JSON, indent, level + 1);
+    }
+    if (indent != 0) {
+        oss << "\n" << std::string(level * indent, ' ');
+    }
+    oss << '}';
+}
+
+void stringifyYamlArray(const TomlValue& value, std::ostringstream& oss, int indent, int level) {
+    const auto& array = value.asArray();
+
+    for (size_t i = 0; i < array.size(); ++i) {
+        oss << std::string(indent * level, ' ') << "-";
+        if (array[i].isObject() || array[i].isArray()) {
+            oss << "\n";
+            stringifyValue(array[i], oss, parser::TO_YAML, indent, level + 1);
+        } else {
+            oss << " ";
+            stringifyValue(array[i], oss, parser::TO_YAML, indent, 0);
+        }
+
+        if (i != array.size() - 1) {
+            oss << "\n";
+        }
+    }
+}
+
+void stringifyYamlObject(const TomlValue& value, std::ostringstream& oss, int indent, int level) {
+    const auto& object  = value.asObject();
+    bool        isFirst = true;
+    for (const auto& [key, val] : object) {
+        if (!isFirst) {
+            oss << "\n";
+        }
+        isFirst = false;
+        // key
+        oss << std::string(indent * level, ' ');
+        if (stringIsBareKey(key)) {
+            oss << key;
+        } else {
+            oss << stringifyString(key);
+        }
+        oss << ":";
+        // value
+        if (val.isObject() || val.isArray()) {
+            oss << "\n";
+            stringifyValue(val, oss, parser::TO_YAML, indent, level + 1);
+        } else {
+            oss << " ";
+            stringifyValue(val, oss, parser::TO_YAML, indent, 0);
         }
     }
 }
 
 namespace parser {
-    std::string stringify(const TomlValue& value) {
+    std::string stringify(const TomlValue& value, StringifyType type, int indent) {
         std::ostringstream oss;
-        stringifyValue(value, oss);
+        stringifyValue(value, oss, type, indent, 0);
         return oss.str();
     }
 }  // namespace parser
