@@ -1,1 +1,7 @@
-"hash#tag" = { a = 3 }
+[[arr]]
+[arr.subtab]
+val = 1
+
+[[arr]]
+[arr.subtab]
+val = 2

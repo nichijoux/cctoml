@@ -42,7 +42,7 @@ TomlDate& TomlDate::operator=(cctoml::TomlDate&& date) noexcept {
 
 #define IS_DIGIT(c) ('0' <= (c) && (c) <= '9')
 
-bool TomlDate::parseTimePart(const std::string_view& sv, size_t& position) {
+bool TomlDate::parseTimePart(const std::string_view& sv, size_t& position) noexcept {
     // 解析时间部分 hh:mm:ss
     auto hour = ParseDigits(sv, position, 2);
     if (!hour || *hour > 23 || position >= sv.size() || sv[position] != ':') {
@@ -139,7 +139,8 @@ void TomlDate::parseTimezoneOffset(const std::string_view& sv, size_t& position)
     m_type = TomlDateTimeType::OFFSET_DATE_TIME;
 }
 
-std::optional<int> TomlDate::ParseDigits(const std::string_view& sv, size_t& position, int count) {
+std::optional<int>
+TomlDate::ParseDigits(const std::string_view& sv, size_t& position, int count) noexcept {
     if (position + count > sv.size()) {
         return std::nullopt;
     }
@@ -157,7 +158,7 @@ std::optional<int> TomlDate::ParseDigits(const std::string_view& sv, size_t& pos
     return value;
 }
 
-bool TomlDate::parseLocalTime(const std::string_view& sv) {
+bool TomlDate::parseLocalTime(const std::string_view& sv) noexcept {
     size_t position = 0;
 
     // 解析时间部分 hh:mm:ss
@@ -269,7 +270,7 @@ void TomlDate::parse(const std::string_view& sv) {
                         std::string(sv));
 }
 
-std::string TomlDate::toString() const {
+std::string TomlDate::toString() const noexcept {
     std::ostringstream oss;
     oss << std::setfill('0');
     // YYYY-MM-dd
@@ -352,7 +353,7 @@ std::chrono::system_clock::time_point TomlDate::toSystemTimePoint() const {
     return timePoint;
 }
 
-void TomlDate::reset() {
+void TomlDate::reset() noexcept {
     m_type      = TomlDateTimeType::INVALID;
     m_core      = 0;
     m_subSecond = 0;
@@ -495,7 +496,7 @@ void TomlValue::destroyValue() noexcept {
     }
 }
 
-TomlValue& TomlValue::set(const std::string& key, const TomlValue& value) {
+TomlValue& TomlValue::insert(const std::string& key, const TomlValue& value) {
     if (m_type != TomlType::Object) {
         destroyValue();
         m_type         = TomlType::Object;
@@ -611,27 +612,166 @@ TomlValue& TomlValue::push_back(const TomlValue& value) {
         }                                                                                          \
     } while (false)
 
+/**
+ * @brief 解析 TOML 格式的键值对列表。
+ * @param data 输入字符串视图。
+ * @param position 当前解析位置（会被更新）
+ * @return 键值对列表，每个元素为键路径（字符串向量）和值的对。
+ * @throws TomlParseException 如果解析失败，抛出异常。
+ */
 static std::vector<std::pair<std::vector<std::string>, TomlValue>>
-                 parseKeyValuePairs(std::string_view data, size_t& position);
+parseKeyValuePairs(std::string_view data, size_t& position);
+
+/**
+ * @brief 解析 TOML 格式的布尔值。
+ * @param data 输入字符串视图。
+ * @param position 当前解析位置（会被更新）
+ * @return 解析后的布尔值（封装为 TomlValue）
+ * @throws TomlParseException 如果布尔值格式无效，抛出异常。
+ */
 static TomlValue parseBoolean(const std::string_view& data, size_t& position);
+
+/**
+ * @brief 解析 TOML 格式的表头（[table] 或 [[table]]）
+ * @param data 输入字符串视图。
+ * @param position 当前解析位置（会被更新）
+ * @param isArray 是否为数组表（[[table]]）
+ * @return 表头键列表（支持点分隔的嵌套键）
+ * @throws TomlParseException 如果表头格式无效，抛出异常。
+ */
 static std::vector<std::string>
 parseTableHeader(const std::string_view& data, size_t& position, bool isArray);
+
+/**
+ * @brief 解析 TOML 格式的裸键（bare key）
+ * @param data 输入字符串视图。
+ * @param position 当前解析位置（会被更新）
+ * @param isTable 是否为表头键（影响终止字符检查）
+ * @return 解析后的裸键字符串。
+ * @throws TomlParseException 如果键格式无效，抛出异常。
+ */
 static TomlString
 parseBareKey(const std::string_view& data, size_t& position, bool isTable = false);
+
+/**
+ * @brief 解析 TOML 格式的引号键（quoted key）
+ * @param data 输入字符串视图。
+ * @param position 当前解析位置（会被更新）
+ * @return 解析后的引号键字符串。
+ * @throws TomlParseException 如果引号键格式无效，抛出异常。
+ */
 static TomlString parseQuotedKeys(const std::string_view& data, size_t& position);
+
+/**
+ * @brief 解析 TOML 格式的键值对。
+ * @param data 输入字符串视图。
+ * @param position 当前解析位置（会被更新）
+ * @param needCrlf 是否要求键值对后有换行符。
+ * @return 键路径（字符串向量）和值的对。
+ * @throws TomlParseException 如果键值对格式无效，抛出异常。
+ */
 static std::pair<std::vector<TomlString>, TomlValue>
 parseKeyValue(const std::string_view& data, size_t& position, bool needCrlf = true);
-static TomlValue   parseValue(const std::string_view& data, size_t& position);
-static TomlValue   parseNumber(const std::string_view& data, size_t& position);
-static TomlValue   parseNumberOrDate(const std::string_view& data, size_t& position);
-static TomlValue   parseArray(const std::string_view& data, size_t& position);
-static TomlValue   parseObject(const std::string_view& data, size_t& position);
-static TomlValue   parseString(const std::string_view& data, size_t& position);
+
+/**
+ * @brief 解析 TOML 格式的任意值（布尔、数字、字符串、日期、数组或对象）
+ * @param data 输入字符串视图。
+ * @param position 当前解析位置（会被更新）
+ * @return 解析后的 TomlValue 对象。
+ * @throws TomlParseException 如果值格式无效，抛出异常。
+ */
+static TomlValue parseValue(const std::string_view& data, size_t& position);
+
+/**
+ * @brief 解析 TOML 格式的数字（整数或浮点数）
+ * @param data 输入字符串视图。
+ * @param position 当前解析位置（会被更新）
+ * @return 解析后的数字（封装为 TomlValue）
+ * @throws TomlParseException 如果数字格式无效，抛出异常。
+ */
+static TomlValue parseNumber(const std::string_view& data, size_t& position);
+
+/**
+ * @brief 解析可能是数字或日期的 TOML 值。
+ * @param data 输入字符串视图。
+ * @param position 当前解析位置（会被更新）
+ * @return 解析后的 TomlValue 对象（数字或日期）
+ * @throws TomlParseException 如果解析失败，抛出异常。
+ */
+static TomlValue parseNumberOrDate(const std::string_view& data, size_t& position);
+
+/**
+ * @brief 解析 TOML 格式的数组。
+ * @param data 输入字符串视图。
+ * @param position 当前解析位置（会被更新）
+ * @return 解析后的数组（封装为 TomlValue）
+ * @throws TomlParseException 如果数组格式无效，抛出异常。
+ */
+static TomlValue parseArray(const std::string_view& data, size_t& position);
+
+/**
+ * @brief 解析 TOML 格式的内联对象。
+ * @param data 输入字符串视图。
+ * @param position 当前解析位置（会被更新）
+ * @return 解析后的对象（封装为 TomlValue）
+ * @throws TomlParseException 如果对象格式无效，抛出异常。
+ */
+static TomlValue parseObject(const std::string_view& data, size_t& position);
+
+/**
+ * @brief 解析 TOML 格式的字符串（基本字符串、字面字符串、多行字符串等）
+ * @param data 输入字符串视图。
+ * @param position 当前解析位置（会被更新）
+ * @return 解析后的字符串（封装为 TomlValue）
+ * @throws TomlParseException 如果字符串格式无效，抛出异常。
+ */
+static TomlValue parseString(const std::string_view& data, size_t& position);
+
+/**
+ * @brief 解析 TOML 格式的 Unicode 转义字符串（\\uXXXX 或 \\UXXXXXXXX）
+ * @param data 输入字符串视图。
+ * @param position 当前解析位置（会被更新）
+ * @return 解析后的 Unicode 字符串。
+ * @throws TomlParseException 如果 Unicode 转义格式无效或码点非法，抛出异常。
+ */
 static std::string parseUnicodeString(const std::string_view& data, size_t& position);
+
+/**
+ * @brief 解析 TOML 格式的基本字符串（带引号，支持转义）
+ * @param data 输入字符串视图。
+ * @param position 当前解析位置（会被更新）
+ * @return 解析后的字符串。
+ * @throws TomlParseException 如果字符串格式无效或包含非法字符，抛出异常。
+ */
 static std::string parseBasicString(const std::string_view& data, size_t& position);
+
+/**
+ * @brief 解析 TOML 格式的多行基本字符串（""" 开头，支持转义和换行）
+ * @param data 输入字符串视图。
+ * @param position 当前解析位置（会被更新）
+ * @return 解析后的字符串。
+ * @throws TomlParseException 如果字符串格式无效或包含非法字符，抛出异常。
+ */
 static std::string parseMultiBasicString(const std::string_view& data, size_t& position);
+
+/**
+ * @brief 解析 TOML 格式的字面字符串（单引号，不支持转义）
+ * @param data 输入字符串视图。
+ * @param position 当前解析位置（会被更新）
+ * @return 解析后的字符串。
+ * @throws TomlParseException 如果字符串格式无效或包含非法字符，抛出异常。
+ */
 static std::string parseLiteralString(const std::string_view& data, size_t& position);
+
+/**
+ * @brief 解析 TOML 格式的多行字面字符串（''' 开头，不支持转义）
+ * @param data 输入字符串视图。
+ * @param position 当前解析位置（会被更新）
+ * @return 解析后的字符串。
+ * @throws TomlParseException 如果字符串格式无效或包含非法字符，抛出异常。
+ */
 static std::string parseMultiLiteralString(const std::string_view& data, size_t& position);
+
 /**
  * @brief 快速检查字符串的某个位置是否“看起来像”一个TOML日期或时间的开始。
  *
@@ -645,6 +785,7 @@ static std::string parseMultiLiteralString(const std::string_view& data, size_t&
  * @return 如果看起来像日期或时间，则为 true，否则为 false。
  */
 static bool looksLikeDateTime(const std::string_view& sv, size_t position) noexcept;
+
 /**
  * @brief 精确、高性能地验证一个字符串视图是否完全匹配TOML的四种日期时间格式之一。
  *
@@ -659,7 +800,7 @@ static bool matchFullDateTime(const std::string_view& data) noexcept;
 static std::vector<std::pair<std::vector<std::string>, TomlValue>>
 parseKeyValuePairs(std::string_view data, size_t& position) {
     std::vector<std::pair<std::vector<std::string>, TomlValue>> keyValues;
-
+    // 不断解析顶层或当前table的key-value对
     while (position < data.size()) {
         SKIP_USELESS_CHAR(data, position);
         // 遇到新的table或者没有内容
@@ -1012,6 +1153,11 @@ TomlValue parseNumberOrDate(const std::string_view& data, size_t& position) {
     return parseNumber(data, position);
 }
 
+/**
+ * @brief 跳过所有无用字符（空白、注释、换行符等）
+ * @param data 输入字符串视图。
+ * @param position 当前解析位置（会被更新）
+ */
 #define SKIP_ALL(data, position)                                                                   \
     do {                                                                                           \
         while (position < data.size()) {                                                           \
@@ -1029,8 +1175,17 @@ TomlValue parseNumberOrDate(const std::string_view& data, size_t& position) {
         }                                                                                          \
     } while (false)
 
+/**
+ * @brief 解析状态：初始状态。
+ */
 #define PARSE_STATE_INIT (0)
+/**
+ * @brief 解析状态：还需要解析一个值。
+ */
 #define PARSE_STATE_HAS_VALUE (1)
+/**
+ * @brief 解析状态：无值。
+ */
 #define PARSE_STATE_NO_VALUE (2)
 
 TomlValue parseArray(const std::string_view& data, size_t& position) {
@@ -1101,9 +1256,9 @@ TomlValue parseObject(const std::string_view& data, size_t& position) {
             }
             // 最后获取的node也必须为object
             if (node->isObject()) {
-                node->set(ks.back(), v);
+                node->insert(ks.back(), v);
             } else {
-                throw TomlParseException("Cannot set value: target is not an object", position);
+                throw TomlParseException("Cannot insert value: target is not an object", position);
             }
         } else {
             throw TomlParseException("Unexpected value after empty array element", position);
@@ -1127,9 +1282,23 @@ TomlValue parseObject(const std::string_view& data, size_t& position) {
 #undef PARSE_STATE_HAS_VALUE
 #undef PARSE_STATE_NO_VALUE
 
+/**
+ * @brief 检查字符串是否以三个相同字符开头。
+ * @param sv 输入字符串视图。
+ * @param pos 起始位置。
+ * @param ch 要检查的字符。
+ * @return 如果字符串在指定位置以三个相同字符开头，返回 true，否则返回 false。
+ */
 #define MATCH3(sv, pos, ch)                                                                        \
     ((pos) + 2 < (sv).size() && (sv)[pos] == (ch) && (sv)[(pos) + 1] == (ch) &&                    \
      (sv)[(pos) + 2] == (ch))
+
+/**
+ * @brief 检查是否为行结束符（\\n 或 \\r\\n）
+ * @param data 输入字符串视图。
+ * @param position 当前位置。
+ * @return 如果是行结束符，返回 true，否则返回 false。
+ */
 #define IS_CRLF(data, position)                                                                    \
     ((data[position] == '\n') ||                                                                   \
      (data[position] == '\r' && position + 1 < data.size() && data[position + 1] == '\n'))
@@ -1220,7 +1389,7 @@ std::string parseBasicString(const std::string_view& data, size_t& position) {
         }
         // 任何 Unicode
         // 字符都可以使用，除了那些必须转义的：引号，反斜杠，以及除制表符外的控制字符（U+0000 至
-        // U+0008，U+000A 至 U+001F，U+007F）。
+        // U+0008，U+000A 至 U+001F，U+007F）
         if (((0x0000 <= c && c <= 0x0008) || (0x000A <= c && c <= 0X001F) || c == 0x007F) &&
             c != 0x0009) {
             throw TomlParseException(
@@ -1414,6 +1583,7 @@ std::string parseMultiLiteralString(const std::string_view& data, size_t& positi
 }
 
 #undef MATCH3
+#undef IS_CRLF
 
 bool looksLikeDateTime(const std::string_view& sv, size_t position) noexcept {
     // 检查 "YYYY-" 模式
@@ -1559,6 +1729,13 @@ namespace parser {
     TomlValue parse(std::string_view data) {
         size_t    position = 0;
         TomlValue root;
+        // todo:Dotted keys create and define a table for each key part before the last one,
+        // provided that such tables were not previously created.
+        // 点状键为最后一个键部分之前的每个键部分创建并定义一个表，前提是之前未创建此类表。
+        // todo:Likewise, using dotted keys to redefine tables already defined in [table] form is
+        // not allowed.
+        // 同样，不允许使用带点键来重新定义已以 [table] 形式定义的表。
+
         // 按行解析
         size_t size = data.size();
         // 1. 先解析顶层内容
@@ -1578,14 +1755,13 @@ namespace parser {
                 }
                 if (node->isObject()) {
                     if (node->asObject().find(k.back()) == node->asObject().end()) {
-                        node->set(k.back(), v);
+                        node->insert(k.back(), v);
                     } else {
                         throw TomlParseException("key '" + k.back() + "' has existed", position);
                     }
                 } else {
                     throw TomlParseException("node is not a object", position);
                 }
-                // todo
             }
         }
         // 2. 解析[]中的内容
@@ -1615,7 +1791,6 @@ namespace parser {
 
             // 解析下面的key-value
             auto keyValues = parseKeyValuePairs(data, position);
-
 #define GET_TARGET_NODE(key)                                                                                   \
     do {                                                                                                       \
         if (node->isObject()) {                                                                                \
@@ -1633,7 +1808,7 @@ namespace parser {
                                      [](const auto& element) { return element.isObject(); });                  \
                     it != array.rend()) {                                                                      \
                     if (it->asObject().find(key) == it->asObject().end()) {                                    \
-                        it->set(key, isArray ? TomlArray() : TomlValue());                                     \
+                        it->insert(key, isArray ? TomlArray() : TomlValue());                                  \
                     }                                                                                          \
                 } else {                                                                                       \
                     array.emplace_back(TomlObject{{key, TomlValue()}});                                        \
@@ -1644,7 +1819,6 @@ namespace parser {
             throw TomlParseException("node should be a array or object", position);                            \
         }                                                                                                      \
     } while (false)
-
             // key-values解析完毕, 根据表头添加数据
             // 查找要添加的表节点
             TomlValue* node = &root;
@@ -1655,7 +1829,7 @@ namespace parser {
             // 相当于[[ a.b ]]的 a 为 node, b是headers.back()
             if (isArray && node->isObject() &&
                 node->asObject().find(headers.back()) == node->asObject().end()) {
-                node->set(headers.back(), TomlArray());
+                node->insert(headers.back(), TomlArray());
             }
             // 如果不存在则会创建一个object
             GET_TARGET_NODE(headers.back());
@@ -1676,12 +1850,12 @@ namespace parser {
                 tempNode = &(*tempNode)[ks[i]];                                                    \
             }                                                                                      \
             if (!tempNode->isObject()) {                                                           \
-                throw TomlParseException("Cannot set key on non-object", position);                \
+                throw TomlParseException("Cannot insert key on non-object", position);             \
             }                                                                                      \
             if (tempNode->asObject().find(ks.back()) != tempNode->asObject().end()) {              \
                 throw TomlParseException("Duplicate key '" + ks.back() + "'", position);           \
             }                                                                                      \
-            tempNode->set(ks.back(), v);                                                           \
+            tempNode->insert(ks.back(), v);                                                        \
         }                                                                                          \
     } while (false)
 
@@ -1715,38 +1889,144 @@ namespace parser {
 #undef SKIP_WHITESPACE_AND_COMMENT
 #undef SKIP_WHITESPACE
 
+/**
+ * @brief 将 TomlValue 对象序列化为指定格式的字符串并写入输出流。
+ * @param value 要序列化的 TomlValue 对象。
+ * @param oss 输出字符串流，用于存储序列化结果。
+ * @param type 序列化格式（默认 TO_TOML，支持 TOML、JSON 或 YAML）
+ * @param indent 缩进大小（用于 JSON 和 YAML 格式，控制每级缩进的空格数）
+ * @param level 当前嵌套层级（用于 JSON 和 YAML 格式，控制缩进深度）
+ */
 static void stringifyValue(const TomlValue&      value,
                            std::ostringstream&   oss,
                            parser::StringifyType type   = parser::TO_TOML,
                            int                   indent = 0,
                            int                   level  = 0);
+
 /**
- * @brief 序列化布尔值到输出流
- * @param value TOML 值（布尔值）
- * @param oss 输出字符串流
+ * @brief 序列化布尔值到输出流。
+ * @param value TOML 值（必须为布尔类型）
+ * @param oss 输出字符串流，用于存储序列化的布尔值（"true" 或 "false"）
  */
 inline static void stringifyBoolean(const TomlValue& value, std::ostringstream& oss);
+
+/**
+ * @brief 序列化整数值到输出流。
+ * @param value TOML 值（必须为整数类型）
+ * @param oss 输出字符串流，用于存储序列化的整数值。
+ */
 inline static void stringifyInteger(const TomlValue& value, std::ostringstream& oss);
-static void        stringifyDouble(const TomlValue& value, std::ostringstream& oss);
+
+/**
+ * @brief 序列化浮点数值到输出流。
+ * @param value TOML 值（必须为浮点类型）
+ * @param oss 输出字符串流，用于存储序列化的浮点数值。
+ */
+static void stringifyDouble(const TomlValue& value, std::ostringstream& oss);
+
+/**
+ * @brief 序列化字符串值到输出流。
+ * @param value TOML 值（必须为字符串类型）
+ * @param oss 输出字符串流，用于存储序列化的字符串（带引号）
+ */
 inline static void stringifyString(const TomlValue& value, std::ostringstream& oss);
+
+/**
+ * @brief 将字符串转换为 TOML 格式的字符串（处理转义字符）
+ * @param s 输入字符串。
+ * @return 序列化后的字符串，包含必要的引号和转义字符。
+ */
 static std::string stringifyString(const std::string& s);
+
+/**
+ * @brief 序列化日期时间值到输出流。
+ * @param value TOML 值（必须为日期类型）
+ * @param oss 输出字符串流，用于存储序列化的日期时间字符串。
+ */
 inline static void stringifyDate(const TomlValue& value, std::ostringstream& oss);
-// toml专用
-static bool        stringIsBareKey(const std::string& s);
-static void        stringifyTomlArray(const TomlValue& value, std::ostringstream& oss);
-static void        stringifyInlineObject(const TomlObject& object, std::ostringstream& oss);
-static bool        isArrayOfTables(const TomlValue& value);
+
+/**
+ * @brief 检查字符串是否为有效的 TOML 裸键（bare key）
+ * @param s 输入字符串。
+ * @return 如果字符串是有效的 TOML 裸键（仅包含字母、数字、下划线或连字符），返回 true，否则返回
+ * false。
+ */
+static bool stringIsBareKey(const std::string& s);
+
+/**
+ * @brief 序列化 TOML 数组到输出流（TOML 格式）
+ * @param value TOML 值（必须为数组类型）
+ * @param oss 输出字符串流，用于存储序列化的 TOML 数组。
+ */
+static void stringifyTomlArray(const TomlValue& value, std::ostringstream& oss);
+
+/**
+ * @brief 序列化 TOML 内联对象到输出流。
+ * @param object TOML 对象。
+ * @param oss 输出字符串流，用于存储序列化的内联对象（键值对用大括号括起来）
+ */
+static void stringifyInlineObject(const TomlObject& object, std::ostringstream& oss);
+
+/**
+ * @brief 检查 TOML 值是否为表数组（array of tables）
+ * @param value TOML 值。
+ * @return 如果值是表数组（数组中的每个元素都是对象），返回 true，否则返回 false。
+ */
+static bool isArrayOfTables(const TomlValue& value);
+
+/**
+ * @brief 序列化 TOML 对象到输出流（TOML 格式）
+ * @param value TOML 值（必须为对象类型）
+ * @param oss 输出字符串流，用于存储序列化的 TOML 对象。
+ */
 inline static void stringifyTomlObject(const TomlValue& value, std::ostringstream& oss);
+
+/**
+ * @brief 序列化 TOML 对象到输出流（TOML 格式，带前缀）
+ * @param object TOML 对象。
+ * @param oss 输出字符串流，用于存储序列化的 TOML 对象。
+ * @param prefix 对象的前缀路径（用于嵌套表）
+ */
 static void
 stringifyTomlObject(const TomlObject& object, std::ostringstream& oss, const std::string& prefix);
-// json专用
+
+/**
+ * @brief 序列化 TOML 数组到输出流（JSON 格式）
+ * @param value TOML 值（必须为数组类型）
+ * @param oss 输出字符串流，用于存储序列化的 JSON 数组。
+ * @param indent 缩进大小（每个缩进级别的空格数）
+ * @param level 当前嵌套层级（控制缩进深度）
+ */
 static void
 stringifyJsonArray(const TomlValue& value, std::ostringstream& oss, int indent, int level);
+
+/**
+ * @brief 序列化 TOML 对象到输出流（JSON 格式）
+ * @param value TOML 值（必须为对象类型）
+ * @param oss 输出字符串流，用于存储序列化的 JSON 对象。
+ * @param indent 缩进大小（每个缩进级别的空格数）
+ * @param level 当前嵌套层级（控制缩进深度）
+ */
 static void
 stringifyJsonObject(const TomlValue& value, std::ostringstream& oss, int indent, int level);
-// yaml专用
+
+/**
+ * @brief 序列化 TOML 数组到输出流（YAML 格式）
+ * @param value TOML 值（必须为数组类型）
+ * @param oss 输出字符串流，用于存储序列化的 YAML 数组。
+ * @param indent 缩进大小（每个缩进级别的空格数）
+ * @param level 当前嵌套层级（控制缩进深度）
+ */
 static void
 stringifyYamlArray(const TomlValue& value, std::ostringstream& oss, int indent, int level);
+
+/**
+ * @brief 序列化 TOML 对象到输出流（YAML 格式）
+ * @param value TOML 值（必须为对象类型）
+ * @param oss 输出字符串流，用于存储序列化的 YAML 对象。
+ * @param indent 缩进大小（每个缩进级别的空格数）
+ * @param level 当前嵌套层级（控制缩进深度）
+ */
 static void
 stringifyYamlObject(const TomlValue& value, std::ostringstream& oss, int indent, int level);
 
@@ -1768,6 +2048,7 @@ void stringifyValue(const TomlValue&      value,
                 case parser::TO_TOML: return stringifyTomlArray(value, oss);
                 case parser::TO_YAML: return stringifyYamlArray(value, oss, indent, level);
                 case parser::TO_JSON: return stringifyJsonArray(value, oss, indent, level);
+                default: return;
             }
         }
         case TomlType::Object: {
@@ -1775,6 +2056,7 @@ void stringifyValue(const TomlValue&      value,
                 case parser::TO_TOML: return stringifyTomlObject(value, oss);
                 case parser::TO_YAML: return stringifyYamlObject(value, oss, indent, level);
                 case parser::TO_JSON: return stringifyJsonObject(value, oss, indent, level);
+                default: return;
             }
         }
     }
@@ -1976,12 +2258,7 @@ void stringifyTomlObject(const TomlObject&   object,
     // 1. 输出非 Object 的字段（顶层属性）
     for (const auto& [k, v] : object) {
         if (v.type() != TomlType::Object && !isArrayOfTables(v)) {
-            if (stringIsBareKey(k)) {
-                oss << k;
-            } else {
-                oss << stringifyString(k);
-            }
-            oss << " = ";
+            oss << (stringIsBareKey(k) ? k : stringifyString(k)) << " = ";
             stringifyValue(v, oss);
             oss << "\n";
         }
@@ -1992,42 +2269,32 @@ void stringifyTomlObject(const TomlObject&   object,
         if (v.type() == TomlType::Object) {
             const auto& child = v.asObject();
             std::string fullKey;
-            if (prefix.empty()) {
-                if (stringIsBareKey(k)) {
-                    fullKey = k;
-                } else {
-                    fullKey = stringifyString(k);
-                }
-            } else {
-                fullKey.append(prefix).append(".");
-                if (stringIsBareKey(k)) {
-                    fullKey += k;
-                } else {
-                    fullKey += stringifyString(k);
-                }
+            // 预先处理当前键的格式
+            const std::string processedKey = stringIsBareKey(k) ? k : stringifyString(k);
+            // 构建完整键
+            if (!prefix.empty()) {
+                fullKey.reserve(prefix.size() + 1 + processedKey.size());
+                fullKey = prefix + '.';
             }
+
+            fullKey += processedKey;
             oss << "\n[" << fullKey << "]\n";
             stringifyTomlObject(child, oss, fullKey);
         } else if (isArrayOfTables(v)) {
             const auto& array = v.asArray();
             std::string fullKey;
-            if (prefix.empty()) {
-                if (stringIsBareKey(k)) {
-                    fullKey = k;
-                } else {
-                    fullKey = "\"" + stringifyString(k) + "\"";
-                }
-            } else {
-                fullKey.append(prefix).append(".");
-                if (stringIsBareKey(k)) {
-                    fullKey += k;
-                } else {
-                    fullKey += stringifyString(k);
-                }
+            // 预先处理当前键的格式
+            const std::string processedKey = stringIsBareKey(k) ? k : stringifyString(k);
+            // 构建完整键
+            if (!prefix.empty()) {
+                fullKey.reserve(prefix.size() + 1 + processedKey.size());
+                fullKey = prefix + '.';
             }
-            for (const auto& elem : array) {
+
+            fullKey += processedKey;
+            for (const auto& item : array) {
                 oss << "\n[[" << fullKey << "]]\n";
-                stringifyTomlObject(elem.asObject(), oss, fullKey);
+                stringifyTomlObject(item.asObject(), oss, fullKey);
             }
         }
     }

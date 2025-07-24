@@ -149,23 +149,6 @@ class TomlStringifyer {
                 oss << num;
 
                 std::string str = oss.str();
-//
-//
-//                // 安全地移除末尾无意义的零
-//                size_t dotPos = str.find('.');
-//                if (dotPos != std::string::npos) {
-//                    size_t lastNonZero = str.find_last_not_of('0');
-//                    if (lastNonZero == dotPos) {
-//                        // 保留小数点后一位零
-//                        if (dotPos + 2 <= str.size()) {
-//                            str.erase(dotPos + 2);
-//                        } else {
-//                            //                        str += "0";
-//                        }
-//                    } else if (lastNonZero != std::string::npos && lastNonZero + 1 < str.size()) {
-//                        str.erase(lastNonZero + 1);
-//                    }
-//                }
                 return str;
             }
         }
