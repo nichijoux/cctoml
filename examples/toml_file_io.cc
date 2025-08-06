@@ -1,12 +1,13 @@
 #include <cctoml.h>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <utility>
 
 using namespace cctoml;
-// using namespace std;
 
 int readToml() {
     // 读取toml文件
@@ -23,15 +24,20 @@ int readToml() {
     TomlValue toml;
     try {
         toml = parser::parse(s);
-        std::cout << toml.toString() << std::endl;
         toml = parser::parse(toml.toString());
-        std::cout << "Successfully parsed config.toml" << std::endl;
+        std::cout << "Successfully parsed config.toml" << '\n';
+        // 迭代
+        auto test = toml["tbl"];
+        for (auto it = test.begin(); it != test.end(); it++) {
+            std::cout << "item:\n" << it.key() << ':' << it.value() << '\n';
+        }
+        std::cout << "----------------------------------------" << '\n';
 
         // 打印Toml内容
-        std::cout << "\nToml Content:" << std::endl;
-        std::cout << "----------------------------------------" << std::endl;
-        std::cout << toml.toString(cctoml::parser::TO_JSON, 4) << std::endl;
-        std::cout << "----------------------------------------" << std::endl;
+        std::cout << "\nToml Content:" << '\n';
+        std::cout << "----------------------------------------" << '\n';
+        std::cout << toml.toString(cctoml::parser::TO_JSON, 4) << '\n';
+        std::cout << "----------------------------------------" << '\n';
 
         std::cout << toml << std::endl;
     } catch (const std::runtime_error& e) {
@@ -41,126 +47,130 @@ int readToml() {
     return 0;
 }
 
-class Trie {
-  public:
-    enum Type { None, Array, Object };
-
+class TomlConflictDetector {
   private:
-    struct TrieNode {
-        std::string                                pathSegment;
-        Type                                       value;
-        std::unordered_map<std::string, TrieNode*> children;
+    struct Node {
+        enum Type { None, Value, ExplictTable, ImplicitTableByValue, ImplicitTableByHeader };
+        Type                                         m_type{None};
+        std::map<std::string, std::shared_ptr<Node>> m_children;
 
-        explicit TrieNode(std::string segment) : pathSegment(std::move(segment)), value(None) {}
+        explicit Node(Type type) : m_type(type) {}
     };
 
-    TrieNode* root;
-
   public:
-    Trie() {
-        root = new TrieNode("");
-    }
-
-    ~Trie() {
-        destroyTrie(root);
-    }
-
-    void clear() {
-        destroyTrie(this->root);
-        root = new TrieNode("");
-    }
-
-    // 插入键值对
-    void insert(const std::string& key, Type value) {
-        std::vector<std::string> segments = split(key);
-        TrieNode*                node     = root;
-        // 遍历子节点
-        for (const auto& segment : segments) {
-            if (node->children.find(segment) == node->children.end()) {
-                // 不存在该segment，则创建
-                node->children.emplace(segment, new TrieNode(segment));
+    void processKeys(const std::vector<std::string>& keys) {
+        auto node = m_root;
+        // 中间的
+        for (size_t i = 0; !keys.empty() && i < keys.size() - 1; ++i) {
+            auto key = getNodeKey(keys[i]);
+            if (auto it = node->m_children.find(key); it == node->m_children.end()) {
+                // 不存在
+                node->m_children.emplace(key, std::make_shared<Node>(Node::ImplicitTableByValue));
+            } else {
+                // 存在
+                auto originType = it->second->m_type;
+                if (originType == Node::Value) {
+                    // 原本已经是值了
+                    throw std::runtime_error("fuck1" + key);
+                }
             }
-            node = node->children[segment];
+            node = node->m_children[key];
         }
-        node->value = value;
+        // 最后一个
+        auto key = getNodeKey(keys.back());
+        if (auto it = node->m_children.find(key); it == node->m_children.end()) {
+            // 不存在
+            node->m_children.emplace(key, std::make_shared<Node>(Node::Value));
+        } else {
+            // 存在
+            throw std::runtime_error("fuck2" + key);
+        }
     }
 
-    // 查找键对应的值
-    [[nodiscard]] Type find(const std::string& key) const {
-        const TrieNode* node = findNode(key);
-        return node != nullptr ? node->value : None;
-    }
-
-    // 判断是否存在以 prefix 为前缀的键
-    [[nodiscard]] bool hasPrefix(const std::string& prefix) const {
-        return findNode(prefix) != nullptr;
-    }
-
-    // 查找最长有效前缀
-    [[nodiscard]] std::pair<std::string, bool> findLongestPrefix(const std::string& key) const {
-        std::vector<std::string> segments = split(key);
-        const TrieNode*          current  = root;
-        std::string              currentPath;
-        // 遍历查找
-        for (size_t i = 0; i < segments.size(); ++i) {
-            auto it = current->children.find(segments[i]);
-            if (it == current->children.end()) {
-                break;
+    void processTableHeader(const std::vector<std::string>& keys) {
+        // 处理创建header
+        auto node = m_root;
+        for (size_t i = 0; !keys.empty() && i < keys.size() - 1; ++i) {
+            auto key = getNodeKey(keys[i]);
+            if (auto it = node->m_children.find(key); it == node->m_children.end()) {
+                // 不存在
+                node->m_children.emplace(key, std::make_shared<Node>(Node::ImplicitTableByHeader));
+            } else {
+                // 存在
+                auto originType = it->second->m_type;
+                if (originType == Node::Value) {
+                    throw std::runtime_error("fuck3");
+                }
             }
-            current = it->second;
-            currentPath += (i == 0 ? "" : ".") + segments[i];
+            node = node->m_children[key];
         }
-        return {currentPath, current->value};
+        auto key = getNodeKey(keys.back());
+        if (auto it = node->m_children.find(keys.back()); it == node->m_children.end()) {
+            // 不存在
+            node->m_children.emplace(key, std::make_shared<Node>(Node::ExplictTable));
+        } else {
+            // 存在
+            auto originType = it->second->m_type;
+            // [a.b.c.d]可以创建[a.b.c]
+            // a.b.c.d = 1 不可以创建 [a.b.c]
+            if (originType == Node::Value || originType == Node::ExplictTable ||
+                originType == Node::ImplicitTableByValue) {
+                throw std::runtime_error("fuck4");
+            }
+        }
+    }
+
+    void processArrayHeader(const std::vector<std::string>& keys) {}
+
+    void addSubTomlDetector(const TomlConflictDetector& detector) {
+        // 将detector中的内容添加到当前conflict中
+    };
+
+  private:
+    static inline std::string getNodeKey(const std::string& key) {
+        return isBareKey(key) ? key : stringifyKey(key);
+    }
+
+    static bool isBareKey(const std::string& s) {
+        // 空字符串不是合法的bareKey
+        if (s.empty()) {
+            return false;
+        }
+        // 第一个字符不能是数字
+        if ('0' <= s.front() && s.front() <= '9') {
+            return false;
+        }
+        // 使用std::all_of检查所有字符是否符合要求
+        return std::all_of(s.begin(), s.end(),
+                           [](char c) { return std::isalnum(c) || c == '_' || c == '-'; });
+    }
+
+    static inline std::string stringifyKey(const std::string& s) {
+        return {"\"" + s + "\""};
     }
 
   private:
-    // 按 '.' 分割路径
-    [[nodiscard]] static std::vector<std::string> split(const std::string& s) {
-        std::vector<std::string> result;
-        size_t                   start = 0;
-        size_t                   end   = s.find('.');
-
-        while (end != std::string::npos) {
-            result.push_back(s.substr(start, end - start));
-            start = end + 1;
-            end   = s.find('.', start);
-        }
-
-        // 处理最后一个子串（或空字符串）
-        result.push_back(s.substr(start));
-
-        return result;
-    }
-
-    // 查找键对应的节点
-    [[nodiscard]] const TrieNode* findNode(const std::string& key) const {
-        std::vector<std::string> segments = split(key);
-        const TrieNode*          node     = root;
-
-        for (const auto& segment : segments) {
-            auto it = node->children.find(segment);
-            if (it == node->children.end()) {
-                return nullptr;
-            }
-            node = it->second;
-        }
-        return node;
-    }
-
-    // 销毁前缀树，释放内存
-    void destroyTrie(TrieNode* node) {
-        if (!node) {
-            return;
-        }
-        for (auto& [k, v] : node->children) {
-            destroyTrie(v);
-        }
-        delete node;
-    }
+    std::shared_ptr<Node> m_root{std::make_shared<Node>(Node::None)};
 };
 
 int main() {
     readToml();
+
+    // parseKeyValuePairs创建一个detector传入parseKeyValue,调用processKeys(),这一层是顶层的
+    // ->再传入到value中,传入parseObject()或者parseArray()函数
+    // 在parseObject内部,我希望解决的是内部key冲突的问题,如{ fruit = { apple.color = "red" },
+    // fruit.apple.texture = { smooth = true } } fruit内部和fruit.冲突
+    // 如果创建一个detector,则其会检测内部的fruit和fruit.apple.texture
+
+    //    TomlConflictDetector detector;
+    //    detector.processKeys({"tbl"});
+    //    detector.processKeys({"fruit"});
+    //    detector.processKeys({"apple", "color"});
+    //    detector.processKeys({"fruit", "apple", "texture"});
+    //    detector.processKeys({"smooth"});
+
+    // parseKeyValuePairs()时会解析一个个key-value，需要传入一个detector
+    // 在parseObject时需要一个局部的detector->为了解决object内部的问题->这个detector还需要返回->为了解决问题object内部套娃object的问题
 
     // 如果是table -> [a.b.c]
     // 则设定a.b.c及下属的m.n为true

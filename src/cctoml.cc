@@ -7,12 +7,13 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <variant>
 
 namespace cctoml {
-
+/*—————————————————————————————————TomlDate—————————————————————————————————————*/
 TomlDate::TomlDate(const TomlDate& date) noexcept {
     m_type      = date.m_type;
     m_core      = date.m_core;
@@ -359,6 +360,8 @@ void TomlDate::reset() noexcept {
     m_subSecond = 0;
 }
 
+/*———————————————————————————————————TomlValue—————————————————————————————————————————*/
+
 TomlValue::TomlValue(const TomlValue& other) : m_type(other.m_type) {
     switch (other.m_type) {
         case TomlType::Boolean: m_value.boolean = other.m_value.boolean; break;
@@ -516,18 +519,13 @@ TomlValue& TomlValue::push_back(const TomlValue& value) {
     return *this;
 }
 
+/*————————————————————————————————————声明————————————————————————————————————————*/
 /**
  * @brief 跳过所有空白字符（空格/制表符/换行符等）
  * @param data 输入的字符串数据（可以是std::string或std::string_view）
  * @param position 当前读取位置（会被修改）
  */
-#define SKIP_WHITESPACE(data, position)                                                            \
-    do {                                                                                           \
-        /* 边界检查 && 当前字符是空白 */                                                \
-        while (position < data.size() && (data[position] == ' ' || data[position] == '\t')) {      \
-            position++; /* 移动到下一个字符 */                                             \
-        }                                                                                          \
-    } while (false)
+static void skipWhitespace(const std::string_view& data, size_t& position) noexcept;
 
 /**
  * @brief 跳过空白字符和注释（直到行尾）
@@ -537,35 +535,9 @@ TomlValue& TomlValue::push_back(const TomlValue& value) {
  * @note 先跳过空白，再处理注释
  * @note 注释以#开始直到行尾（\\n或\\r）
  * @note 注释中禁止出现除制表符外的控制字符
+ * @throw TomlParseException 如果注释中存在非法控制字符则抛出异常
  */
-#define SKIP_WHITESPACE_AND_COMMENT(data, position)                                                \
-    do {                                                                                           \
-        while (position < data.size()) {                                                           \
-            /* 1. 先跳过普通空白 */                                                         \
-            SKIP_WHITESPACE(data, position);                                                       \
-            /* 2. 检查是否遇到注释 */                                                      \
-            if (position < data.size() && data[position] == '#') {                                 \
-                /* 跳过注释内容，同时检查非法控制字符 */                          \
-                position++; /* 跳过#符号 */                                                    \
-                while (position < data.size()) {                                                   \
-                    char c = data[position];                                                       \
-                    /* 检查是否为行结束符 */                                              \
-                    if (c == '\n' || c == '\r') {                                                  \
-                        break;                                                                     \
-                    }                                                                              \
-                    /* 检查是否为非法控制字符（除制表符外） */                   \
-                    if ((static_cast<unsigned char>(c) <= 0x1F && c != '\t') || c == 0x7F) {       \
-                        throw TomlParseException(                                                  \
-                            "Control character (except tab) not allowed in comment", position);    \
-                    }                                                                              \
-                    position++;                                                                    \
-                }                                                                                  \
-            } else {                                                                               \
-                /* 非注释字符，结束跳过 */                                               \
-                break;                                                                             \
-            }                                                                                      \
-        }                                                                                          \
-    } while (false)
+static void skipWhitespaceAndComment(const std::string_view& data, size_t& position);
 
 /**
  * @brief 跳过行结束符（\\r\\n或者\\n）
@@ -575,17 +547,7 @@ TomlValue& TomlValue::push_back(const TomlValue& value) {
  * @note 先检查是否为\\r，若是则跳过；再检查是否为\\n，若是则跳过
  * @note 可处理\\r\\n、\\r、\\n等不同换行风格
  */
-#define SKIP_CRLF(data, position)                                                                  \
-    do {                                                                                           \
-        if (position < data.size() && data[position] == '\r' && position + 1 < data.size() &&      \
-            data[position + 1] == '\n') {                                                          \
-            /* 必须要\r\n才能换行,单独一个回车符不被toml允许 */                  \
-            position += 2;                                                                         \
-        } else if (position < data.size() && data[position] == '\n') {                             \
-            ++position;                                                                            \
-        }                                                                                          \
-                                                                                                   \
-    } while (false)
+static void skipCrlf(const std::string_view& data, size_t& position) noexcept;
 
 /**
  * @brief 跳过所有无用字符（空白、注释、换行符）
@@ -596,21 +558,7 @@ TomlValue& TomlValue::push_back(const TomlValue& value) {
  * @note 循环执行直到无法继续跳过字符（位置不再变化）
  * @note 注释以#开始直到行尾（\\n或\\r）
  */
-#define SKIP_USELESS_CHAR(data, position)                                                          \
-    do {                                                                                           \
-        while (position < data.size()) {                                                           \
-            /* 记录本次循环开始的位置 */                                                \
-            size_t currentStart = position;                                                        \
-            /* 跳过空白 */                                                                     \
-            SKIP_WHITESPACE_AND_COMMENT(data, position);                                           \
-            /* 处理换行 */                                                                     \
-            SKIP_CRLF(data, position);                                                             \
-            /* 如果本轮没有移动position，则退出循环 */                               \
-            if (position <= currentStart) {                                                        \
-                break;                                                                             \
-            }                                                                                      \
-        }                                                                                          \
-    } while (false)
+static void skipUselessChar(const std::string_view& data, size_t& position);
 
 /**
  * @brief 解析 TOML 格式的键值对列表。
@@ -797,12 +745,75 @@ static bool looksLikeDateTime(const std::string_view& sv, size_t position) noexc
  */
 static bool matchFullDateTime(const std::string_view& data) noexcept;
 
+/*———————————————————————————————————实现———————————————————————————————————————————*/
+
+static void skipWhitespace(const std::string_view& data, size_t& position) noexcept {
+    // 边界检查 && 当前字符是空白
+    while (position < data.size() && (data[position] == ' ' || data[position] == '\t')) {
+        // 移动到下一个字符
+        position++;
+    }
+}
+
+static void skipWhitespaceAndComment(const std::string_view& data, size_t& position) {
+    while (position < data.size()) {
+        // 1. 先跳过普通空白
+        skipWhitespace(data, position);
+        // 2. 检查是否遇到注释
+        if (position < data.size() && data[position] == '#') {
+            // 跳过#符号
+            position++;
+            while (position < data.size()) {
+                char c = data[position];
+                if (c == '\n' || c == '\r') {
+                    // 检查是否为行结束符
+                    return;
+                } else if ((static_cast<unsigned char>(c) <= 0x1F && c != '\t') || c == 0x7F) {
+                    // 检查是否为非法控制字符（除制表符外）
+                    throw TomlParseException(
+                        "Control character (except tab) not allowed in comment", position);
+                } else {
+                    position++;
+                }
+            }
+        } else {
+            // 非注释字符，结束跳过
+            return;
+        }
+    }
+}
+
+static void skipCrlf(const std::string_view& data, size_t& position) noexcept {
+    if (position < data.size() && data[position] == '\r' && position + 1 < data.size() &&
+        data[position + 1] == '\n') {
+        // 必须要\r\n才能换行,单独一个回车符不被toml允许
+        position += 2;
+    } else if (position < data.size() && data[position] == '\n') {
+        ++position;
+    }
+}
+
+static void skipUselessChar(const std::string_view& data, size_t& position) {
+    while (position < data.size()) {
+        // 记录本次循环开始的位置
+        size_t currentStart = position;
+        // 跳过空白及注释
+        skipWhitespaceAndComment(data, position);
+        // 处理换行
+        skipCrlf(data, position);
+        // 如果本轮没有移动position，则退出循环
+        if (position <= currentStart) {
+            return;
+        }
+    }
+}
+
 static std::vector<std::pair<std::vector<std::string>, TomlValue>>
 parseKeyValuePairs(std::string_view data, size_t& position) {
     std::vector<std::pair<std::vector<std::string>, TomlValue>> keyValues;
     // 不断解析顶层或当前table的key-value对
     while (position < data.size()) {
-        SKIP_USELESS_CHAR(data, position);
+        skipUselessChar(data, position);
         // 遇到新的table或者没有内容
         if (position >= data.size() || data[position] == '[') {
             break;
@@ -835,14 +846,14 @@ parseTableHeader(const std::string_view& data, size_t& position, bool isArray) {
     auto                     size = data.size();
     // 解析key
     while (position < size) {
-        SKIP_WHITESPACE(data, position);
+        skipWhitespace(data, position);
         if (position < size && (data[position] == '"' || data[position] == '\'')) {
             headers.emplace_back(parseQuotedKeys(data, position));
         } else {
             headers.emplace_back(parseBareKey(data, position, true));
         }
         // 跳过空白字符
-        SKIP_WHITESPACE(data, position);
+        skipWhitespace(data, position);
         // 检查是否有点分隔符
         if (position < size && data[position] == '.') {
             position++;
@@ -890,14 +901,14 @@ parseKeyValue(const std::string_view& data, size_t& position, bool needCrlf) {
     auto                    size = data.size();
     // 解析key
     while (position < size) {
-        SKIP_WHITESPACE(data, position);
+        skipWhitespace(data, position);
         if (position < size && (data[position] == '"' || data[position] == '\'')) {
             keys.emplace_back(parseQuotedKeys(data, position));
         } else {
             keys.emplace_back(parseBareKey(data, position));
         }
         // 跳过空白字符
-        SKIP_WHITESPACE(data, position);
+        skipWhitespace(data, position);
         // 检查是否有点分隔符,有则继续解析
         if (position < size && data[position] == '.') {
             position++;
@@ -906,7 +917,7 @@ parseKeyValue(const std::string_view& data, size_t& position, bool needCrlf) {
         }
     }
     // 跳过空白，直到遇到=
-    SKIP_WHITESPACE(data, position);
+    skipWhitespace(data, position);
     if (position >= size || data[position] != '=') {
         throw TomlParseException("Expect = after a key", position);
     } else {
@@ -914,12 +925,12 @@ parseKeyValue(const std::string_view& data, size_t& position, bool needCrlf) {
     }
     // 解析value
     auto value = parseValue(data, position);
-    SKIP_WHITESPACE_AND_COMMENT(data, position);
+    skipWhitespaceAndComment(data, position);
     // 换行
     if (needCrlf && position < size &&
         (data[position] == '\r' || data[position] == '\n' || data[position] == '}' ||
          data[position] == ']' || data[position] == ',')) {
-        SKIP_CRLF(data, position);
+        skipCrlf(data, position);
     } else if (needCrlf && position < size) {
         throw TomlParseException("A line break is required after the value", position);
     }
@@ -928,7 +939,7 @@ parseKeyValue(const std::string_view& data, size_t& position, bool needCrlf) {
 
 TomlValue parseValue(const std::string_view& data, size_t& position) {
     // 跳过前面的空白
-    SKIP_WHITESPACE(data, position);
+    skipWhitespace(data, position);
     // 根据当前字符判断是哪种类型
     char c = data[position];
     if (c == '"' || c == '\'') {
@@ -1158,22 +1169,19 @@ TomlValue parseNumberOrDate(const std::string_view& data, size_t& position) {
  * @param data 输入字符串视图。
  * @param position 当前解析位置（会被更新）
  */
-#define SKIP_ALL(data, position)                                                                   \
-    do {                                                                                           \
-        while (position < data.size()) {                                                           \
-            /* 跳过空格、制表符 */                                                         \
-            SKIP_WHITESPACE(data, position);                                                       \
-            /* 注释：跳过整行直到换行符 */                                             \
-            SKIP_WHITESPACE_AND_COMMENT(data, position);                                           \
-            /* 跳过换行符（\r\n 或 \n）*/                                                  \
-            SKIP_CRLF(data, position);                                                             \
-            /* 如果都不是，就 break */                                                      \
-            if (position < data.size() && data[position] != '#' && data[position] != ' ' &&        \
-                data[position] != '\t' && data[position] != '\r' && data[position] != '\n') {      \
-                break;                                                                             \
-            }                                                                                      \
-        }                                                                                          \
-    } while (false)
+static void skipAll(const std::string_view& data, size_t& position) {
+    while (position < data.size()) {
+        // 跳过整行直到换行符
+        skipWhitespaceAndComment(data, position);
+        // 跳过换行符（\r\n 或 \n）
+        skipCrlf(data, position);
+        // 如果都不是，就结束
+        if (position < data.size() && data[position] != '#' && data[position] != ' ' &&
+            data[position] != '\t' && data[position] != '\r' && data[position] != '\n') {
+            return;
+        }
+    }
+}
 
 /**
  * @brief 解析状态：初始状态。
@@ -1191,15 +1199,15 @@ TomlValue parseNumberOrDate(const std::string_view& data, size_t& position) {
 TomlValue parseArray(const std::string_view& data, size_t& position) {
     // 当前字符一定为[
     position++;
-    SKIP_ALL(data, position);
+    skipAll(data, position);
     // 解析以,分割的一个个value (而不是key-value)
     TomlArray array;
     // 0 -> init
     // 1 -> has value
     // 2 -> no value
-    char state = PARSE_STATE_INIT;
+    auto state = PARSE_STATE_INIT;
     while (position < data.size()) {
-        SKIP_ALL(data, position);
+        skipAll(data, position);
         // 遇到]说明结束了
         if (data[position] == ']') {
             position++;
@@ -1210,7 +1218,7 @@ TomlValue parseArray(const std::string_view& data, size_t& position) {
         } else {
             throw TomlParseException("Unexpected value after empty array element", position);
         }
-        SKIP_ALL(data, position);
+        skipAll(data, position);
         // 如果为,则说明还有值,否则则应该return了
         if (position < data.size() && data[position] == ',') {
             position++;
@@ -1229,9 +1237,9 @@ TomlValue parseObject(const std::string_view& data, size_t& position) {
     // 0 -> init
     // 1 -> has value
     // 2 -> no value
-    char state = PARSE_STATE_INIT;
+    auto state = PARSE_STATE_INIT;
     while (position < data.size()) {
-        SKIP_WHITESPACE_AND_COMMENT(data, position);
+        skipWhitespaceAndComment(data, position);
         if (data[position] == '}') {
             // 在内联表中的最后一个键/值对之后，不允许终止逗号
             if (state != PARSE_STATE_HAS_VALUE) {
@@ -1265,7 +1273,7 @@ TomlValue parseObject(const std::string_view& data, size_t& position) {
         }
 
         // 跳过空白及注释
-        SKIP_WHITESPACE_AND_COMMENT(data, position);
+        skipWhitespaceAndComment(data, position);
         // 判断是否还有值
         if (position < data.size() && data[position] == ',') {
             state = PARSE_STATE_HAS_VALUE;
@@ -1437,7 +1445,7 @@ std::string parseMultiBasicString(const std::string_view& data, size_t& position
     // 此时当前字符串一定为"""
     position += 3;
     // 跳过开头的换行符（如果存在）
-    SKIP_CRLF(data, position);
+    skipCrlf(data, position);
     std::string result;
     bool        inEscape = false;  // 标记是否处于转义状态
     while (position < data.size()) {
@@ -1551,7 +1559,7 @@ std::string parseLiteralString(const std::string_view& data, size_t& position) {
 std::string parseMultiLiteralString(const std::string_view& data, size_t& position) {
     position += 3;
     // 跳过开头的换行符（如果存在）
-    SKIP_CRLF(data, position);
+    skipCrlf(data, position);
     std::string result;
     result.reserve(32);
     while (position < data.size()) {
@@ -1767,7 +1775,7 @@ namespace parser {
         // 2. 解析[]中的内容
         while (position < size) {
             // 跳过无用字符串
-            SKIP_WHITESPACE_AND_COMMENT(data, position);
+            skipWhitespaceAndComment(data, position);
             if (position >= size) {
                 break;
             }
@@ -1782,42 +1790,42 @@ namespace parser {
             // 解析表头（然后期待换行）
             auto headers = parseTableHeader(data, position, isArray);
             // 表头后可能存在空白和注释
-            SKIP_WHITESPACE_AND_COMMENT(data, position);
+            skipWhitespaceAndComment(data, position);
             // 表头需要换行
             if (position < size && data[position] != '\r' && data[position] != '\n') {
                 throw TomlParseException("A line break is required after the value", position);
             }
-            SKIP_CRLF(data, position);
+            skipCrlf(data, position);
 
             // 解析下面的key-value
             auto keyValues = parseKeyValuePairs(data, position);
-#define GET_TARGET_NODE(key)                                                                                   \
-    do {                                                                                                       \
-        if (node->isObject()) {                                                                                \
-            /* 如果node是一个object, 那么直接获取其key(不存在则会自动创建) */             \
-            node = &(*node)[key];                                                                              \
-        } else if (node->isArray()) {                                                                          \
-            /* 如果node是一个array, 那么其内容可能不存在,则需要对array推入一个object */ \
-            auto& array = node->asArray();                                                                     \
-            if (array.empty()) {                                                                               \
-                array.emplace_back(TomlObject{{key, TomlValue()}});                                            \
-            } else {                                                                                           \
-                /* 找到最近的那个object对象 */                                                        \
-                if (auto it =                                                                                  \
-                        std::find_if(array.rbegin(), array.rend(),                                             \
-                                     [](const auto& element) { return element.isObject(); });                  \
-                    it != array.rend()) {                                                                      \
-                    if (it->asObject().find(key) == it->asObject().end()) {                                    \
-                        it->insert(key, isArray ? TomlArray() : TomlValue());                                  \
-                    }                                                                                          \
-                } else {                                                                                       \
-                    array.emplace_back(TomlObject{{key, TomlValue()}});                                        \
-                }                                                                                              \
-            }                                                                                                  \
-            node = &(array.back()[key]);                                                                       \
-        } else {                                                                                               \
-            throw TomlParseException("node should be a array or object", position);                            \
-        }                                                                                                      \
+#define GET_TARGET_NODE(key)                                                                       \
+    do {                                                                                           \
+        if (node->isObject()) {                                                                    \
+            /* 如果node是一个object, 那么直接获取其key(不存在则会自动创建) */                      \
+            node = &(*node)[key];                                                                  \
+        } else if (node->isArray()) {                                                              \
+            /* 如果node是一个array, 那么其内容可能不存在,则需要对array推入一个object */            \
+            auto& array = node->asArray();                                                         \
+            if (array.empty()) {                                                                   \
+                array.emplace_back(TomlObject{{key, TomlValue()}});                                \
+            } else {                                                                               \
+                /* 找到最近的那个object对象 */                                                     \
+                if (auto it =                                                                      \
+                        std::find_if(array.rbegin(), array.rend(),                                 \
+                                     [](const auto& element) { return element.isObject(); });      \
+                    it != array.rend()) {                                                          \
+                    if (it->asObject().find(key) == it->asObject().end()) {                        \
+                        it->insert(key, isArray ? TomlArray() : TomlValue());                      \
+                    }                                                                              \
+                } else {                                                                           \
+                    array.emplace_back(TomlObject{{key, TomlValue()}});                            \
+                }                                                                                  \
+            }                                                                                      \
+            node = &(array.back()[key]);                                                           \
+        } else {                                                                                   \
+            throw TomlParseException("node should be a array or object", position);                \
+        }                                                                                          \
     } while (false)
             // key-values解析完毕, 根据表头添加数据
             // 查找要添加的表节点
@@ -1875,7 +1883,7 @@ namespace parser {
             }
         }
         // 跳过无用字符串
-        SKIP_WHITESPACE_AND_COMMENT(data, position);
+        skipWhitespaceAndComment(data, position);
         if (position != data.size()) {
             throw TomlParseException("Unexpected content after Toml value", position);
         }
@@ -1942,8 +1950,10 @@ static std::string stringifyString(const std::string& s);
  * @brief 序列化日期时间值到输出流。
  * @param value TOML 值（必须为日期类型）
  * @param oss 输出字符串流，用于存储序列化的日期时间字符串。
+ * @param type 序列化类型
  */
-inline static void stringifyDate(const TomlValue& value, std::ostringstream& oss);
+inline static void
+stringifyDate(const TomlValue& value, std::ostringstream& oss, parser::StringifyType type);
 
 /**
  * @brief 检查字符串是否为有效的 TOML 裸键（bare key）
@@ -2041,7 +2051,7 @@ void stringifyValue(const TomlValue&      value,
         case TomlType::Double: return stringifyDouble(value, oss);
         case TomlType::String: return stringifyString(value, oss);
         case TomlType::Date:
-            return stringifyDate(value, oss);
+            return stringifyDate(value, oss, type);
             // 根据类型又可以分出json、toml、yaml的stringify方法
         case TomlType::Array: {
             switch (type) {
@@ -2188,8 +2198,12 @@ std::string stringifyString(const std::string& s) {
     return oss.str();
 }
 
-void stringifyDate(const TomlValue& value, std::ostringstream& oss) {
-    oss << value.asDate();
+void stringifyDate(const TomlValue& value, std::ostringstream& oss, parser::StringifyType type) {
+    switch (type) {
+        case parser::TO_TOML:
+        case parser::TO_YAML: oss << value.asDate(); break;
+        case parser::TO_JSON: oss << '"' << value.asDate() << '"'; break;
+    }
 }
 
 void stringifyTomlArray(const TomlValue& value, std::ostringstream& oss) {

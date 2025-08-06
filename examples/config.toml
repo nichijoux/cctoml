@@ -1,7 +1,1 @@
-[[arr]]
-[arr.subtab]
-val = 1
-
-[[arr]]
-[arr.subtab]
-val = 2
+tbl = { fruit = { apple.color = "red" }, dd.apple.texture = { smooth = true } }

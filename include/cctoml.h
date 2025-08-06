@@ -7,11 +7,13 @@
 
 #    include <chrono>
 #    include <cstdint>
+#    include <iterator>
 #    include <map>
 #    include <optional>
 #    include <stdexcept>
 #    include <string>
 #    include <unordered_map>
+#    include <variant>
 #    include <vector>
 
 namespace cctoml {
@@ -90,8 +92,8 @@ namespace parser {
     /**
      * @brief 将 TomlValue 序列化为指定格式的字符串。
      * @param value 要序列化的 TomlValue 对象。
-     * @param type 序列化格式（TO_TOML、TO_JSON 或 TO_YAML）
-     * @param indent 缩进空格数（仅对 JSON 和 YAML 有效，0 表示无缩进）
+     * @param type 序列化格式（TO_TOML、TO_Toml 或 TO_YAML）
+     * @param indent 缩进空格数（仅对 Toml 和 YAML 有效，0 表示无缩进）
      * @return 序列化后的字符串。
      */
     std::string
@@ -781,8 +783,25 @@ class TomlValue {
         m_type         = TomlType::Object;
         m_value.object = new TomlObject();
         for (const auto& item : init) {
-            auto pair                     = static_cast<std::pair<const char*, TomlValue>>(item);
-            (*m_value.object)[pair.first] = pair.second;
+            auto [k, v]          = static_cast<std::pair<const char*, TomlValue>>(item);
+            (*m_value.object)[k] = v;
+        }
+    }
+
+    /**
+     * @brief 使用初始化列表构造数组类型的 TOML 数据。
+     * @param init 初始化列表，包含非键值对的元素。
+     */
+    template <
+        typename T,
+        std::enable_if_t<!std::is_convertible_v<T, std::pair<const char*, TomlValue>>, int> = 0>
+    TomlValue(std::initializer_list<T> init) {
+        // 数组初始化
+        m_type        = TomlType::Array;
+        m_value.array = new TomlArray();
+        m_value.array->reserve(init.size());
+        for (const auto& item : init) {
+            m_value.array->emplace_back(TomlValue(item));
         }
     }
 
@@ -853,6 +872,19 @@ class TomlValue {
         for (const auto& item : init) {
             m_value.array->emplace_back(TomlValue(item));
         }
+        return *this;
+    }
+
+    /**
+     * @brief 为向量赋值（std::vector）
+     * @tparam T 向量元素的类型
+     * @param vec 向量对象
+     * @return 自身引用
+     * @note 内部调用 toToml 将向量序列化为 TOML 数组
+     */
+    template <typename T>
+    TomlValue& operator=(const std::vector<T>& vec) {
+        *this = toToml(vec);
         return *this;
     }
 
@@ -1200,8 +1232,8 @@ class TomlValue {
 
     /**
      * @brief 将 TomlValue 转换为字符串表示。
-     * @param type 序列化格式（TO_TOML、TO_JSON 或 TO_YAML）。
-     * @param indent 缩进空格数（仅对 JSON 和 YAML 有效）。
+     * @param type 序列化格式（TO_TOML、TO_Toml 或 TO_YAML）。
+     * @param indent 缩进空格数（仅对 Toml 和 YAML 有效）。
      * @return 序列化后的字符串。
      */
     inline std::string toString(parser::StringifyType type   = parser::StringifyType::TO_TOML,
@@ -1219,6 +1251,370 @@ class TomlValue {
     friend std::ostream& operator<<(std::ostream& os, const TomlValue& value) {
         os << value.toString();
         return os;
+    }
+
+  private:
+    /**
+     * @brief 通用迭代器模板类，用于遍历 TOML 数据结构（对象、数组或普通类型）。
+     * @tparam T 迭代器操作的值类型（通常为 TomlValue）。
+     * @tparam IsConst 是否为常量迭代器（true 表示 const，false 表示非 const）。
+     */
+    template <typename T, bool IsConst>
+    class BaseIterator {
+      public:
+        using value_type      = std::conditional_t<IsConst, const T, T>;  ///< 迭代器指向的值类型。
+        using pointer         = value_type*;                              ///< 指向值的指针类型。
+        using reference       = value_type&;                              ///< 值的引用类型。
+        using difference_type = std::ptrdiff_t;                           ///< 迭代器差值类型。
+        using iterator_category = std::bidirectional_iterator_tag;  ///< 迭代器类别（双向迭代器）。
+
+        using ObjectIterator = std::conditional_t<IsConst,
+                                                  TomlObject::const_iterator,
+                                                  TomlObject::iterator>;  ///< 对象迭代器类型。
+        using ArrayIterator  = std::conditional_t<IsConst,
+                                                  TomlArray::const_iterator,
+                                                  TomlArray::iterator>;  ///< 数组迭代器类型。
+
+        /**
+         * @brief 构造函数，初始化迭代器。
+         * @param value 指向的 TOML 值（对象、数组或基本类型）。
+         * @param end 是否为结束迭代器（true 表示结束位置，false 表示起始位置）。
+         */
+        BaseIterator(std::conditional_t<IsConst, const T*, T*> value, bool end = false)
+            : m_value(value) {
+            if (value->isObject()) {
+                m_it = end ? value->m_value.object->end() : value->m_value.object->begin();
+            } else if (value->isArray()) {
+                m_it = end ? value->m_value.array->end() : value->m_value.array->begin();
+            } else {
+                m_it = end ? static_cast<size_t>(1) : 0;
+            }
+        }
+
+        /**
+         * @brief 解引用操作符，返回当前迭代器指向的值。
+         * @return 当前值的引用。
+         */
+        reference operator*() const {
+            if (m_value->isObject()) {
+                return std::get<ObjectIterator>(m_it)->second;
+            } else if (m_value->isArray()) {
+                return *std::get<ArrayIterator>(m_it);
+            } else {
+                return *m_value;
+            }
+        }
+
+        /**
+         * @brief 箭头操作符，返回当前迭代器指向值的指针。
+         * @return 指向当前值的指针。
+         */
+        pointer operator->() const {
+            return &this->operator*();
+        }
+
+        /**
+         * @brief 前置递增操作符，移动到下一个元素。
+         * @return 当前迭代器的引用。
+         */
+        BaseIterator& operator++() {
+            if (m_value->isObject()) {
+                ++std::get<ObjectIterator>(m_it);
+            } else if (m_value->isArray()) {
+                ++std::get<ArrayIterator>(m_it);
+            } else {
+                ++std::get<size_t>(m_it);
+            }
+            return *this;
+        }
+
+        /**
+         * @brief 后置递增操作符，移动到下一个元素并返回原迭代器副本。
+         * @return 原迭代器的副本。
+         */
+        BaseIterator operator++(int) {
+            BaseIterator tmp = *this;
+            ++(*this);
+            return tmp;
+        }
+
+        /**
+         * @brief 前置递减操作符，移动到上一个元素。
+         * @return 当前迭代器的引用。
+         */
+        BaseIterator& operator--() {
+            if (m_value->isObject()) {
+                --std::get<ObjectIterator>(m_it);
+            } else if (m_value->isArray()) {
+                --std::get<ArrayIterator>(m_it);
+            } else {
+                --std::get<size_t>(m_it);
+            }
+            return *this;
+        }
+
+        /**
+         * @brief 后置递减操作符，移动到上一个元素并返回原迭代器副本。
+         * @return 原迭代器的副本。
+         */
+        BaseIterator operator--(int) {
+            BaseIterator tmp = *this;
+            --(*this);
+            return tmp;
+        }
+
+        /**
+         * @brief 比较两个迭代器是否相等。
+         * @param other 另一个迭代器。
+         * @return 如果两个迭代器指向相同位置，返回 true，否则返回 false。
+         */
+        bool operator==(const BaseIterator& other) const {
+            if (m_value != other.m_value) {
+                return false;
+            }
+            if (m_value->isObject()) {
+                return std::get<ObjectIterator>(m_it) == std::get<ObjectIterator>(other.m_it);
+            } else if (m_value->isArray()) {
+                return std::get<ArrayIterator>(m_it) == std::get<ArrayIterator>(other.m_it);
+            } else {
+                return std::get<size_t>(m_it) == std::get<size_t>(other.m_it);
+            }
+        }
+
+        /**
+         * @brief 比较两个迭代器是否不相等。
+         * @param other 另一个迭代器。
+         * @return 如果两个迭代器指向不同位置，返回 true，否则返回 false。
+         */
+        bool operator!=(const BaseIterator& other) const {
+            return !(this->operator==(other));
+        }
+
+        /**
+         * @brief 获取当前对象迭代器的键（仅适用于对象类型）。
+         * @return 当前键的字符串。
+         * @throws TomlException 如果迭代器不指向对象类型。
+         */
+        std::string key() const {
+            if (!m_value->isObject()) {
+                throw TomlException("Not an object iterator");
+            }
+            return std::get<ObjectIterator>(m_it)->first;
+        }
+
+        /**
+         * @brief 获取当前迭代器的值。
+         * @return 当前值的引用。
+         */
+        reference value() const {
+            return operator*();
+        }
+
+      private:
+        std::conditional_t<IsConst, const T*, T*> m_value = nullptr;  ///< 指向的 TOML 值。
+        std::variant<ObjectIterator, ArrayIterator, size_t>
+            m_it;  ///< 内部迭代器（对象、数组或基本类型的索引）。
+    };
+
+    /**
+     * @brief 非 const 迭代器类型，用于遍历可修改的 TomlValue。
+     */
+    using Iterator = BaseIterator<TomlValue, false>;
+
+    /**
+     * @brief const 迭代器类型，用于遍历不可修改的 TomlValue。
+     */
+    using ConstIterator = BaseIterator<TomlValue, true>;
+
+    /**
+     * @brief 反向迭代器模板类，用于反向遍历 TOML 数据结构。
+     * @tparam ForwardIt 正向迭代器类型。
+     */
+    template <typename ForwardIt>
+    class BaseReverseIterator {
+      public:
+        using value_type        = typename ForwardIt::value_type;  ///< 反向迭代器指向的值类型。
+        using reference         = typename ForwardIt::reference;   ///< 值的引用类型。
+        using pointer           = typename ForwardIt::pointer;     ///< 指向值的指针类型。
+        using difference_type   = typename ForwardIt::difference_type;  ///< 迭代器差值类型。
+        using iterator_category = std::bidirectional_iterator_tag;  ///< 迭代器类别（双向迭代器）。
+
+        /**
+         * @brief 构造函数，初始化反向迭代器。
+         * @param it 正向迭代器，用于初始化反向迭代器。
+         */
+        explicit BaseReverseIterator(ForwardIt it) : m_it(std::move(it)) {}
+
+        /**
+         * @brief 解引用操作符，返回当前反向迭代器指向的值。
+         * @return 当前值的引用。
+         */
+        reference operator*() const {
+            auto tmp = m_it;
+            return *--tmp;
+        }
+
+        /**
+         * @brief 箭头操作符，返回当前反向迭代器指向值的指针。
+         * @return 指向当前值的指针。
+         */
+        pointer operator->() const {
+            auto tmp = m_it;
+            return &*--tmp;
+        }
+
+        /**
+         * @brief 前置递增操作符，移动到上一个元素（反向遍历）。
+         * @return 当前反向迭代器的引用。
+         */
+        BaseReverseIterator& operator++() {
+            --m_it;
+            return *this;
+        }
+
+        /**
+         * @brief 后置递增操作符，移动到上一个元素并返回原迭代器副本。
+         * @return 原反向迭代器的副本。
+         */
+        BaseReverseIterator operator++(int) {
+            BaseReverseIterator tmp = *this;
+            --m_it;
+            return tmp;
+        }
+
+        /**
+         * @brief 前置递减操作符，移动到下一个元素（反向遍历）。
+         * @return 当前反向迭代器的引用。
+         */
+        BaseReverseIterator& operator--() {
+            ++m_it;
+            return *this;
+        }
+
+        /**
+         * @brief 后置递减操作符，移动到下一个元素并返回原迭代器副本。
+         * @return 原反向迭代器的副本。
+         */
+        BaseReverseIterator operator--(int) {
+            BaseReverseIterator tmp = *this;
+            ++m_it;
+            return tmp;
+        }
+
+        /**
+         * @brief 比较两个反向迭代器是否相等。
+         * @param other 另一个反向迭代器。
+         * @return 如果两个反向迭代器指向相同位置，返回 true，否则返回 false。
+         */
+        bool operator==(const BaseReverseIterator& other) const {
+            return m_it == other.m_it;
+        }
+
+        /**
+         * @brief 比较两个反向迭代器是否不相等。
+         * @param other 另一个反向迭代器。
+         * @return 如果两个反向迭代器指向不同位置，返回 true，否则返回 false。
+         */
+        bool operator!=(const BaseReverseIterator& other) const {
+            return m_it != other.m_it;
+        }
+
+        /**
+         * @brief 获取当前对象反向迭代器的键（仅适用于对象类型）。
+         * @return 当前键的字符串。
+         * @throws TomlException 如果迭代器不指向对象类型。
+         */
+        std::string key() const {
+            auto tmp = m_it;
+            return (--tmp).key();
+        }
+
+        /**
+         * @brief 获取当前反向迭代器的值。
+         * @return 当前值的引用。
+         */
+        reference value() const {
+            auto tmp = m_it;
+            return (--tmp).value();
+        }
+
+      private:
+        ForwardIt m_it;  ///< 内部正向迭代器。
+    };
+
+    /**
+     * @brief 非 const 反向迭代器类型，用于反向遍历可修改的 TomlValue。
+     */
+    using ReverseIterator = BaseReverseIterator<Iterator>;
+
+    /**
+     * @brief const 反向迭代器类型，用于反向遍历不可修改的 TomlValue。
+     */
+    using ConstReverseIterator = BaseReverseIterator<ConstIterator>;
+
+  public:
+    /**
+     * @brief 获取 TOML 数据结构的正向迭代器（非 const），指向起始位置。
+     * @return Iterator 类型的迭代器，指向 TOML 数据的开头。
+     */
+    Iterator begin() {
+        return {this};
+    }
+
+    /**
+     * @brief 获取 TOML 数据结构的正向迭代器（非 const），指向结束位置。
+     * @return Iterator 类型的迭代器，指向 TOML 数据的末尾。
+     */
+    Iterator end() {
+        return {this, true};
+    }
+
+    /**
+     * @brief 获取 TOML 数据结构的反向迭代器（非 const），指向反向遍历的起始位置（即正向的末尾）。
+     * @return ReverseIterator 类型的反向迭代器，指向 TOML 数据的末尾。
+     */
+    ReverseIterator rbegin() {
+        return ReverseIterator(end());
+    }
+
+    /**
+     * @brief 获取 TOML 数据结构的反向迭代器（非 const），指向反向遍历的结束位置（即正向的开头）。
+     * @return ReverseIterator 类型的反向迭代器，指向 TOML 数据的开头。
+     */
+    ReverseIterator rend() {
+        return ReverseIterator(begin());
+    }
+
+    /**
+     * @brief 获取 TOML 数据结构的正向迭代器（const），指向起始位置。
+     * @return ConstIterator 类型的迭代器，指向 TOML 数据的开头。
+     */
+    ConstIterator begin() const {
+        return {this};
+    }
+
+    /**
+     * @brief 获取 TOML 数据结构的正向迭代器（const），指向结束位置。
+     * @return ConstIterator 类型的迭代器，指向 TOML 数据的末尾。
+     */
+    ConstIterator end() const {
+        return {this, true};
+    }
+
+    /**
+     * @brief 获取 TOML 数据结构的反向迭代器（const），指向反向遍历的起始位置（即正向的末尾）。
+     * @return ConstReverseIterator 类型的反向迭代器，指向 TOML 数据的末尾。
+     */
+    ConstReverseIterator rbegin() const {
+        return ConstReverseIterator(end());
+    }
+
+    /**
+     * @brief 获取 TOML 数据结构的反向迭代器（const），指向反向遍历的结束位置（即正向的开头）。
+     * @return ConstReverseIterator 类型的反向迭代器，指向 TOML 数据的开头。
+     */
+    ConstReverseIterator rend() const {
+        return ConstReverseIterator(begin());
     }
 
   private:
@@ -1315,7 +1711,7 @@ TomlValue toToml(const Map& map) {
  * @return 解析后的TomlValue
  * @note 解析调用TomlParser::parse且不支持任何扩展
  */
-inline TomlValue operator""_Toml(const char* data, size_t length) {
+inline TomlValue operator""_toml(const char* data, size_t length) {
     return parser::parse({data, length});
 }
 
@@ -1323,3 +1719,5 @@ inline TomlValue operator""_Toml(const char* data, size_t length) {
 
 #endif
 #pragma clang diagnostic pop
+
+// ...
